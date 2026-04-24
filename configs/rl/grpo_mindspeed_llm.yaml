@@ -1,0 +1,4 @@
+entrypoint: verl.trainer.main_ppo
+backend: mindspeed
+rollout_engine: sglang
+notes: "Template only. Follow VERL MindSpeedLLM NPU examples for model-specific llm_kwargs."

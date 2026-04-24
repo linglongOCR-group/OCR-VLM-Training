@@ -1,0 +1,4 @@
+project: ${oc.env:WANDB_PROJECT,ocr-vlm-training}
+entity: ${oc.env:WANDB_ENTITY,null}
+mode: ${oc.env:WANDB_MODE,online}
+log_val_generations: ${oc.env:LOG_VAL_GENERATIONS,8}

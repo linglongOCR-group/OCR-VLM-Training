@@ -1,0 +1,13 @@
+project_name: ${oc.env:WANDB_PROJECT,ocr-vlm-training}
+experiment_name: ${oc.env:EXPERIMENT_NAME,ocr-vlm-bootstrap}
+logger: ["console", "wandb"]
+nnodes: ${oc.env:NNODES,1}
+n_gpus_per_node: ${oc.env:NPUS_PER_NODE,8}
+device: npu
+default_local_dir: ${oc.env:CKPTS_DIR,checkpoints/ocr-vlm-bootstrap}
+resume_mode: ${oc.env:RESUME_MODE,auto}
+resume_from_path: ${oc.env:RESUME_FROM_PATH,null}
+save_freq: ${oc.env:SAVE_FREQ,10}
+test_freq: ${oc.env:TEST_FREQ,10}
+val_before_train: ${oc.env:VAL_BEFORE_TRAIN,true}
+total_epochs: ${oc.env:TOTAL_EPOCHS,1}

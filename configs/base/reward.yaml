@@ -1,0 +1,7 @@
+custom_reward_function:
+  path: ${oc.env:PROJECT_ROOT}/src/rewards/aggregate.py
+  name: compute_score
+  reward_kwargs:
+    reward_version: levenshtein_v1
+reward_manager:
+  name: naive

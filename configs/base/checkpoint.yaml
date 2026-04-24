@@ -1,0 +1,6 @@
+local_root: ${oc.env:CKPTS_DIR,checkpoints/ocr-vlm-bootstrap}
+resume_mode: ${oc.env:RESUME_MODE,auto}
+resume_from_path: ${oc.env:RESUME_FROM_PATH,null}
+save_contents: ["model", "optimizer", "extra"]
+register_wandb_reference: true
+resume_compatibility_version: verl-bootstrap-v1

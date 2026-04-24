@@ -1,0 +1,6 @@
+-r base.txt
+torch-npu
+vllm
+vllm-ascend
+mindspeed
+megatron-core

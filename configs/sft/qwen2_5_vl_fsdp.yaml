@@ -1,0 +1,21 @@
+entrypoint: verl.trainer.sft_trainer
+backend: fsdp
+model:
+  path: ${oc.env:MODEL_PATH}
+  use_remove_padding: true
+data:
+  train_files: ${oc.env:TRAIN_FILE}
+  val_files: ${oc.env:VAL_FILE,null}
+  train_batch_size: ${oc.env:TRAIN_BATCH_SIZE,64}
+  micro_batch_size_per_gpu: ${oc.env:MICRO_BATCH_SIZE_PER_GPU,1}
+  max_length: ${oc.env:MAX_LENGTH,4096}
+  pad_mode: no_padding
+  messages_key: messages
+trainer:
+  project_name: ${oc.env:WANDB_PROJECT,ocr-vlm-training}
+  experiment_name: ${oc.env:EXPERIMENT_NAME,sft-qwen2-5-vl-fsdp}
+  logger: ["console", "wandb"]
+  nnodes: ${oc.env:NNODES,1}
+  n_gpus_per_node: ${oc.env:NPUS_PER_NODE,8}
+  default_local_dir: ${oc.env:CKPTS_DIR,checkpoints/sft-qwen2-5-vl-fsdp}
+  resume_mode: ${oc.env:RESUME_MODE,auto}

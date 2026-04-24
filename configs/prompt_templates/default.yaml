@@ -1,0 +1,27 @@
+image_placeholder: "<image>"
+
+page:
+  default: "{{ image_placeholder }}\nAnalyze the page image and return the requested OCR result."
+  rules:
+    - match:
+        task_type: ["page_markdown", "page_to_markdown", "page_assembly"]
+      prompt: "{{ image_placeholder }}\nConvert the page image into markdown."
+
+region:
+  default: "{{ image_placeholder }}\nRecognize the {{ region_type }} content in the image."
+  rules:
+    - match:
+        task_type_contains: "table"
+        region_type: "table"
+      prompt: "{{ image_placeholder }}\nRecognize the table in the image and return the requested table representation."
+    - match:
+        task_type_contains: "formula"
+        region_type: "formula"
+      prompt: "{{ image_placeholder }}\nRecognize the formula in the image and return LaTeX."
+    - match:
+        task_type_contains: "seal"
+        region_type: "seal"
+      prompt: "{{ image_placeholder }}\nRecognize the seal or stamp content in the image."
+
+detection:
+  default: "{{ image_placeholder }}\nDetect the requested document objects and return a JSON list of instances."

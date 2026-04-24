@@ -1,0 +1,10 @@
+datasets
+omegaconf
+pandas
+pyarrow
+pyyaml
+ray
+torch
+transformers
+verl
+wandb

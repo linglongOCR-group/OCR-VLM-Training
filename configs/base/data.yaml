@@ -1,0 +1,12 @@
+# Source records are exported to VERL-compatible parquet views before training.
+train_files: ${oc.env:TRAIN_FILE}
+val_files: ${oc.env:VAL_FILE,null}
+prompt_key: prompt
+image_key: images
+reward_fn_key: data_source
+max_prompt_length: 1024
+max_response_length: 2048
+train_batch_size: 128
+filter_overlong_prompts: true
+truncation: error
+return_raw_chat: true

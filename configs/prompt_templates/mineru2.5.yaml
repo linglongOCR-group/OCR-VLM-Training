@@ -1,0 +1,78 @@
+image_placeholder: "<image>"
+
+formats:
+  layout_detection:
+    pattern: "<|box_start|>x1 y1 x2 y2<|box_end|><|ref_start|>type<|ref_end|>rotation_token"
+    tokens:
+      box_start: "<|box_start|>"
+      box_end: "<|box_end|>"
+      ref_start: "<|ref_start|>"
+      ref_end: "<|ref_end|>"
+      rotate_up: "<|rotate_up|>"
+      rotate_right: "<|rotate_right|>"
+      rotate_down: "<|rotate_down|>"
+      rotate_left: "<|rotate_left|>"
+    coordinates_normalized: true
+
+  table_recognition:
+    format: otsl
+    tokens:
+      nl: "<nl>"
+      fcel: "<fcel>"
+      ecel: "<ecel>"
+      lcel: "<lcel>"
+      ucel: "<ucel>"
+      xcel: "<xcel>"
+
+  text_recognition:
+    format: plain_text
+
+  formula_recognition:
+    format: latex
+
+sampling:
+  layout_detection:
+    max_new_tokens: 4096
+    temperature: 0.0
+  table_recognition:
+    max_new_tokens: 4096
+    temperature: 0.0
+  text_recognition:
+    max_new_tokens: 2048
+    temperature: 0.0
+  formula_recognition:
+    max_new_tokens: 2048
+    temperature: 0.0
+
+page:
+  default: "{{ image_placeholder }}\nAnalyze the page image and return the requested OCR result."
+  rules:
+    - match:
+        task_type: ["page_markdown", "page_to_markdown", "page_assembly"]
+      prompt: "{{ image_placeholder }}\nConvert the page image into markdown."
+    - match:
+        task_type: ["page_layout", "layout_detection"]
+      prompt: "\nLayout Detection:"
+
+region:
+  default: "{{ image_placeholder }}\nRecognize the {{ region_type }} content in the image."
+  rules:
+    - match:
+        task_type_contains: "table"
+        region_type: "table"
+      prompt: "{{ image_placeholder }}\nRecognize the table in the image and return the OTSL table structure."
+    - match:
+        task_type_contains: "formula"
+        region_type: "formula"
+      prompt: "{{ image_placeholder }}\nRecognize the formula in the image and return LaTeX."
+    - match:
+        task_type_contains: "seal"
+        region_type: "seal"
+      prompt: "{{ image_placeholder }}\nRecognize the seal or stamp content in the image."
+    - match:
+        task_type_contains: "text"
+        region_type: "text"
+      prompt: "{{ image_placeholder }}\nRecognize the text in the image."
+
+detection:
+  default: "{{ image_placeholder }}\nDetect the requested document objects and return bounding boxes."

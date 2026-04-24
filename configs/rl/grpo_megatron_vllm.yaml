@@ -1,0 +1,4 @@
+entrypoint: verl.trainer.main_ppo
+backend: megatron
+rollout_engine: vllm
+notes: "Template only. Validate Megatron/MBridge dependencies in the target image before production runs."

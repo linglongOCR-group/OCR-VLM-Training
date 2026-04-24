@@ -1,0 +1,4 @@
+path: ${oc.env:MODEL_PATH}
+use_remove_padding: true
+enable_gradient_checkpointing: true
+trust_remote_code: true
