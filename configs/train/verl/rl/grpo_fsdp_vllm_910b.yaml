@@ -1,0 +1,28 @@
+entrypoint: verl.trainer.main_ppo
+backend: fsdp
+rollout_engine: vllm
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+data:
+  train_files: ${oc.env:TRAIN_FILE}
+  val_files: ${oc.env:VAL_FILE}
+  prompt_key: prompt
+  image_key: images
+  reward_fn_key: data_source
+  train_batch_size: ${oc.env:TRAIN_BATCH_SIZE,128}
+  max_prompt_length: ${oc.env:MAX_PROMPT_LENGTH,1024}
+  max_response_length: ${oc.env:MAX_RESPONSE_LENGTH,2048}
+reward:
+  custom_reward_function:
+    path: ${oc.env:PROJECT_ROOT}/verl_plugins/rewards/aggregate.py
+    name: compute_score
+    reward_kwargs:
+      reward_version: levenshtein_v1
+trainer:
+  project_name: ${oc.env:WANDB_PROJECT,ocr-vlm-training}
+  experiment_name: ${oc.env:EXPERIMENT_NAME,grpo-fsdp-vllm}
+  nnodes: ${oc.env:NNODES,1}
+  n_gpus_per_node: ${oc.env:NPUS_PER_NODE,8}
+  default_local_dir: ${oc.env:CKPTS_DIR,checkpoints/grpo-fsdp-vllm}
+  resume_mode: ${oc.env:RESUME_MODE,auto}

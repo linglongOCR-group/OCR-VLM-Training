@@ -1,0 +1,28 @@
+name: DocBank_500K_table_rlvr
+description: "RLVR training view — DocBank_500K table recognition with Normalized Levenshtein reward"
+stage: rlvr
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/DocBank_500K_table_rlvr
+
+include:
+  - task: table
+    sources: [DocBank_500K]
+
+target_serialization:
+  table: enhanced_otsl_v1
+
+reward_profile:
+  default: normalized_levenshtein_v1
+
+reward_payload:
+  default: {}
+
+split_policy:
+  level: document
+  seed: 42
+  train_ratio: 0.98
+  val_ratio: 0.01

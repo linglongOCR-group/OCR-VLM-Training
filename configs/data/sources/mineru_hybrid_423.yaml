@@ -1,0 +1,52 @@
+dataset_name: MinerU_Hybrid_4_23
+description: >-
+  A hybrid dataset built by Ouyang, encompassing layout detection, text recognition,
+  table recognition, and formula recognition tasks. 31,000 pre-built message-format
+  records with MinerU-style annotations.
+
+source_path: sources/MinerU_Hybrid_4_23
+source_readme: sources/MinerU_Hybrid_4_23/README.md
+canonical_output: canonical
+
+original_source:
+  builder: Ouyang
+  data_file: sources/MinerU_Hybrid_4_23/data.json
+
+license: null
+
+dataset_scale:
+  total_records: 31000
+  layout: 5000
+  text: 3842
+  table: 15000
+  formula: 7158
+
+adapter: hybrid_message
+annotation_format: Pre-built message format (MinerU box tokens / OTSL / LaTeX / plain text)
+image_extensions:
+  - .png
+  - .jpg
+  - .jpeg
+
+supported_tasks:
+  - layout
+  - table
+  - formula
+  - text
+export_tasks:
+  - layout
+  - table
+  - formula
+  - text
+
+processing:
+  owner: Boyu Hou
+  date: "2026-04-27"
+  known_issues:
+    - "Images use absolute paths on /mnt/server-0/ and /mnt/server-1/"
+    - "Layout box tokens use grid (0-1000) coordinates, converted to pixel during export"
+  export_notes: []
+
+shard_size: 5000
+allow_unreadable_images: true
+skip_errors: false

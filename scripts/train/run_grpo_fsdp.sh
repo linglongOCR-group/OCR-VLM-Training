@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_ROOT=${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 export PROJECT_ROOT
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
+export HYDRA_FULL_ERROR=1
 
 MODEL_PATH=${MODEL_PATH:?MODEL_PATH is required}
 TRAIN_FILE=${TRAIN_FILE:?TRAIN_FILE is required}
@@ -80,12 +81,12 @@ fi
 
 if [ "${VALIDATE_GRPO_VIEW}" = "True" ]; then
   if [ "${USE_VALIDATION}" = "True" ]; then
-    python -m src.data.validate_grpo_view \
+    python -m tools.data_management.validate_grpo_view \
       --max-rows-per-file="${VALIDATE_GRPO_MAX_ROWS_PER_FILE}" \
       "${TRAIN_FILE}" \
       "${VAL_FILE}"
   else
-    python -m src.data.validate_grpo_view \
+    python -m tools.data_management.validate_grpo_view \
       --max-rows-per-file="${VALIDATE_GRPO_MAX_ROWS_PER_FILE}" \
       "${TRAIN_FILE}"
   fi
@@ -104,8 +105,8 @@ python -m verl.trainer.main_ppo \
   data.image_key=images \
   data.reward_fn_key=data_source \
   data.train_batch_size="${TRAIN_BATCH_SIZE}" \
-  data.max_prompt_length="${MAX_PROMPT_LENGTH:-1024}" \
-  data.max_response_length="${MAX_RESPONSE_LENGTH:-2048}" \
+  data.max_prompt_length="${MAX_PROMPT_LENGTH:-2048}" \
+  data.max_response_length="${MAX_RESPONSE_LENGTH:-4096}" \
   data.filter_overlong_prompts=True \
   data.truncation=error \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
@@ -140,8 +141,10 @@ python -m verl.trainer.main_ppo \
   actor_rollout_ref.ref.fsdp_config.param_offload=True \
   actor_rollout_ref.ref.entropy_checkpointing="${REF_ENTROPY_CHECKPOINTING}" \
   actor_rollout_ref.ref.entropy_from_logits_with_chunking="${REF_ENTROPY_FROM_LOGITS_WITH_CHUNKING}" \
+  actor_rollout_ref.rollout.enable_chunked_prefill=True \
+  actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True \
   algorithm.use_kl_in_reward=False \
-  reward.custom_reward_function.path="${PROJECT_ROOT}/src/rewards/aggregate.py" \
+  reward.custom_reward_function.path="${PROJECT_ROOT}/verl_plugins/rewards/aggregate.py" \
   reward.custom_reward_function.name=compute_score \
   +reward.custom_reward_function.reward_kwargs.reward_version=levenshtein_v1 \
   trainer.logger="${TRAINER_LOGGER}" \

@@ -1,0 +1,22 @@
+name: DocBank_500K_table_sft
+description: "SFT view — DocBank_500K table recognition only"
+stage: sft
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/DocBank_500K_table_sft
+
+include:
+  - task: table
+    sources: [DocBank_500K]
+
+target_serialization:
+  table: enhanced_otsl_v1
+
+split_policy:
+  level: document
+  seed: 42
+  train_ratio: 0.98
+  val_ratio: 0.01

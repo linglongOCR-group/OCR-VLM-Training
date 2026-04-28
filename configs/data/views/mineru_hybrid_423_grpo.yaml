@@ -1,0 +1,42 @@
+name: MinerU_Hybrid_4_23_grpo
+description: "GRPO (RLVR) training view — MinerU_Hybrid_4_23 all tasks, MinerU 2.5 format, layout pad-to-square 1036x1036"
+stage: rlvr
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/MinerU_Hybrid_4_23_grpo
+
+include:
+  - task: layout
+    sources: [MinerU_Hybrid_4_23]
+  - task: text
+    sources: [MinerU_Hybrid_4_23]
+  - task: table
+    sources: [MinerU_Hybrid_4_23]
+  - task: formula
+    sources: [MinerU_Hybrid_4_23]
+
+target_serialization:
+  layout: mineru_layout_box_v1
+  table: enhanced_otsl_v1
+  formula: latex_plain_v1
+  text: plain_text_v1
+
+image_transform:
+  layout:
+    pad_to_square: false
+    resize_to: 1036
+
+reward_profile:
+  default: normalized_levenshtein_v1
+
+reward_payload:
+  default: {}
+
+split_policy:
+  level: document
+  seed: 42
+  train_ratio: 1.0
+  val_ratio: 0.0

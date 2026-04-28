@@ -7,40 +7,47 @@ The project deliberately avoids reimplementing training. VERL owns distributed
 training, rollout, checkpoint save/load, FSDP, vLLM/vLLM-Ascend, Megatron, and
 MindSpeed integration. This repo provides:
 
-- multi-granularity OCR data source schemas,
-- exporters from source records to VERL-compatible parquet views,
-- a temporary shared Normalized Levenshtein reward for all GRPO tasks,
+- spec-aligned source, canonical, and view dataset processing,
+- canonical-to-SFT/RLVR parquet view construction,
+- an initial Normalized Levenshtein reward adapter for RLVR bring-up,
 - W&B reference-artifact helpers for local checkpoints,
 - launch wrappers and config examples.
 
 ## Data Module
 
-Source data is stored at its natural granularity:
+The data module follows the dataset specs under `docs/`:
 
-- `PageRecord`: full page data for page markdown, layout, reading order, and page-level evaluation.
-- `RegionRecord`: crop or patch data for text, table, formula, diagram, or seal recognition.
-- `DetectionRecord`: object detection or classification data for pages, synthetic canvases, or isolated regions.
-
-The source records are not forced into one physical page schema. Training uses
-derived views:
-
-- `sft`: emits `messages` and `images` for VERL SFT.
-- `grpo`: emits `prompt`, `images`, `reward_model`, `data_source`, and `extra_info` for VERL GRPO.
-- `layout`: emits image plus object instances for layout/detection training or later evaluation tooling.
-
-MinerU-annotated datasets can be converted into canonical records directly. The
-converter is generic; DocBank is just the first profile:
-
-```bash
-python -m src.data.mineru_export --profile configs/data_profiles/docbank_mineru.yaml
+```text
+Source -> Canonical -> View
 ```
 
-For a quick smoke export:
+Canonical data stores model-independent documents, pages, regions, task records,
+image asset manifests, and lineage. Views materialize model-specific SFT or RLVR
+training parquet with prompts, serialized labels, split assignments, and reward
+payloads.
+
+Set `OCR_DATASET_ROOT` once per environment. The data CLI derives
+`sources/`, `canonical/`, and `views/` from that root unless an explicit path is
+provided:
 
 ```bash
-python -m src.data.mineru_export \
-  --profile configs/data_profiles/docbank_mineru.yaml \
-  --max-samples 10
+export OCR_DATASET_ROOT=/home/byhou/datasets/ocr-training
+```
+
+MinerU-annotated datasets can be converted into canonical partitions with the
+repo-local data CLI:
+
+```bash
+scripts/data/docds export-source mineru \
+  --source-config configs/data/sources/docbank_mineru.yaml
+```
+
+For a scoped export:
+
+```bash
+scripts/data/docds export-source mineru \
+  --source-config configs/data/sources/docbank_mineru.yaml \
+  --tasks layout,table,formula,text
 ```
 
 By default, malformed annotation samples stop the export. Use `--skip-errors`
@@ -48,34 +55,29 @@ only when you want those samples listed in the manifest and omitted from the
 canonical shards. `allow_unreadable_images` only controls missing or
 permission-denied source images.
 
-The profile writes sharded parquet under:
+The profile writes partitioned parquet under:
 
 ```text
-/home/byhou/datasets/ocr-training/canonical/page_records/DocBank_500K/
-/home/byhou/datasets/ocr-training/canonical/detection_records/DocBank_500K/
-/home/byhou/datasets/ocr-training/canonical/region_records/DocBank_500K/
-/home/byhou/datasets/ocr-training/canonical/_manifests/
+/home/byhou/datasets/ocr-training/canonical/entities/documents/source=DocBank_500K/
+/home/byhou/datasets/ocr-training/canonical/entities/pages/source=DocBank_500K/
+/home/byhou/datasets/ocr-training/canonical/entities/regions/source=DocBank_500K/
+/home/byhou/datasets/ocr-training/canonical/records/<task>/source=DocBank_500K/
+/home/byhou/datasets/ocr-training/canonical/assets/manifests/source=DocBank_500K/
+/home/byhou/datasets/ocr-training/canonical/manifests/sources/DocBank_500K.json
 ```
 
-Example:
+Validate canonical output:
 
 ```bash
-python -m src.data.export_views \
-  --input data/source/regions.jsonl \
-  --view grpo \
-  --output data/views/region_grpo.parquet
+scripts/data/docds validate-canonical --source DocBank_500K
 ```
 
-For larger canonical datasets, export sharded training views from canonical
-directories instead of loading everything into one process:
+Build and validate a training view from `views/<view_name>/view.yaml`:
 
 ```bash
-python -m src.data.export_views \
-  --input /home/byhou/datasets/ocr-training/canonical/page_records/DocBank_500K \
-          /home/byhou/datasets/ocr-training/canonical/region_records/DocBank_500K \
-  --view sft \
-  --output-dir /home/byhou/datasets/ocr-training/views/DocBank_500K/sft \
-  --shard-size 10000
+scripts/data/docds build-view /home/byhou/datasets/ocr-training/views/mineru25_rlvr/view.yaml
+scripts/data/docds validate-view /home/byhou/datasets/ocr-training/views/mineru25_rlvr
+scripts/data/docds reward-smoke-test --view /home/byhou/datasets/ocr-training/views/mineru25_rlvr --limit 1000
 ```
 
 ## GRPO With Ray
@@ -125,12 +127,12 @@ Checkpoint files remain local or on mounted storage. Register metadata in W&B
 as a reference artifact:
 
 ```bash
-python -m src.callbacks.save_and_eval register-checkpoint \
+python -m verl_plugins.callbacks.save_and_eval register-checkpoint \
   --checkpoint-dir /mnt/ckpts/ocr-vlm/grpo-smoke/global_step_10 \
   --global-step 10 \
   --training-mode grpo \
   --model-id /mnt/models/Qwen2.5-VL-7B-Instruct \
-  --config-hash "$(sha256sum configs/rl/grpo_fsdp_vllm_910b.yaml | awk '{print $1}')" \
+  --config-hash "$(sha256sum configs/train/verl/rl/grpo_fsdp_vllm_910b.yaml | awk '{print $1}')" \
   --wandb-project ocr-vlm-training
 ```
 

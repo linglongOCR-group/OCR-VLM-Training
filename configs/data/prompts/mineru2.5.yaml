@@ -1,0 +1,158 @@
+# MinerU2.5-compatible raw prompt and target contract.
+#
+# This follows docs/mineru-data-format.md: train on the raw strings expected by
+# mineru-vl-utils parsers, not explanatory prompts or post-processed outputs.
+image_placeholder: "<image>"
+system_prompt: "You are a helpful assistant."
+
+task:
+  layout: "{{ image_placeholder }}\nLayout Detection:"
+  table: "{{ image_placeholder }}\nTable Recognition:"
+  formula: "{{ image_placeholder }}\nFormula Recognition:"
+  text: "{{ image_placeholder }}\nText Recognition:"
+  diagram: "{{ image_placeholder }}\nImage Analysis:"
+  image: "{{ image_placeholder }}\nImage Analysis:"
+  chart: "{{ image_placeholder }}\nImage Analysis:"
+  default: "{{ image_placeholder }}\nText Recognition:"
+
+prompt_mapping:
+  layout: layout
+  table: table
+  equation: formula
+  formula: formula
+  image: diagram
+  chart: diagram
+  default: text
+
+block_types:
+  layout_supported:
+    - text
+    - title
+    - table
+    - equation
+    - code
+    - algorithm
+    - aside_text
+    - ref_text
+    - phonetic
+    - list_item
+    - table_caption
+    - image_caption
+    - code_caption
+    - table_footnote
+    - image_footnote
+    - header
+    - footer
+    - page_number
+    - page_footnote
+    - image
+    - chart
+    - list
+    - image_block
+    - equation_block
+    - unknown
+  text_like:
+    - text
+    - title
+    - code
+    - algorithm
+    - aside_text
+    - ref_text
+    - phonetic
+    - list_item
+    - table_caption
+    - image_caption
+    - code_caption
+    - table_footnote
+    - image_footnote
+    - header
+    - footer
+    - page_number
+    - page_footnote
+  formula_like:
+    - equation
+  table_like:
+    - table
+  image_analysis_like:
+    - image
+    - chart
+
+formats:
+  layout_detection:
+    format: mineru_layout_box
+    prompt: "\nLayout Detection:"
+    pattern: "<|box_start|>x1 y1 x2 y2<|box_end|><|ref_start|>type<|ref_end|><|rotate_*|>"
+    coordinate_grid: 1000
+    coordinate_space: logical_0_1000_xyxy
+    coordinates_normalized_after_parse: true
+    require_rotation_token: true
+    tokens:
+      box_start: "<|box_start|>"
+      box_end: "<|box_end|>"
+      ref_start: "<|ref_start|>"
+      ref_end: "<|ref_end|>"
+      rotate_up: "<|rotate_up|>"
+      rotate_right: "<|rotate_right|>"
+      rotate_down: "<|rotate_down|>"
+      rotate_left: "<|rotate_left|>"
+    rotation_degrees:
+      rotate_up: 0
+      rotate_right: 90
+      rotate_down: 180
+      rotate_left: 270
+
+  table_recognition:
+    format: otsl
+    prompt: "\nTable Recognition:"
+    raw_target: otsl
+    postprocess_target: html
+    tokens:
+      nl: "<nl>"
+      fcel: "<fcel>"
+      ecel: "<ecel>"
+      lcel: "<lcel>"
+      ucel: "<ucel>"
+      xcel: "<xcel>"
+    optional_extension_tokens:
+      nest_start: "<nest_start>"
+      nest_end: "<nest_end>"
+
+  text_recognition:
+    format: plain_text
+    prompt: "\nText Recognition:"
+    raw_target: plain_text
+    constraints:
+      markdown_fences: false
+      explanatory_prose: false
+
+  formula_recognition:
+    format: latex
+    prompt: "\nFormula Recognition:"
+    raw_target: latex
+    constraints:
+      markdown_fences: false
+      explanatory_prose: false
+      wrap_dollars: false
+
+  image_analysis:
+    format: plain_text
+    prompt: "\nImage Analysis:"
+    raw_target: analysis_text
+    optional: true
+
+sampling:
+  layout_detection:
+    max_new_tokens: 4096
+    temperature: 0.0
+  table_recognition:
+    max_new_tokens: 4096
+    temperature: 0.0
+  text_recognition:
+    max_new_tokens: 2048
+    temperature: 0.0
+  formula_recognition:
+    max_new_tokens: 2048
+    temperature: 0.0
+  image_analysis:
+    max_new_tokens: 2048
+    temperature: 0.0

@@ -1,4 +1,4 @@
-from src.data.otsl import html_to_otsl, otsl_to_html
+from tools.data_management.otsl import html_to_otsl, otsl_to_html
 
 
 def test_otsl_to_html_simple_2x2():

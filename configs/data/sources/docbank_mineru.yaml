@@ -1,0 +1,60 @@
+dataset_name: DocBank_500K
+description: >-
+  DocBank is a weakly supervised large-scale document page dataset for
+  integrating textual and layout information in downstream tasks.
+
+source_path: sources/DocBank_500K
+source_readme: sources/DocBank_500K/README.md
+canonical_output: canonical
+
+original_source:
+  mainpage: https://doc-analysis.github.io/docbank-page/
+  github: https://github.com/doc-analysis/DocBank
+  huggingface: https://huggingface.co/datasets/liminghao1630/DocBank
+license: null
+
+dataset_scale:
+  total_pages: 500000
+  train_pages: 400000
+  validation_pages: 50000
+  test_pages: 50000
+
+documented_layout:
+  original_images: DocBank_500K_ori_images/
+  mineru_annotations: mineru_annotations/
+
+# Operational paths used by the local MinerU export. The source README records
+# the logical layout, but those subdirectories are not currently materialized
+# under source_root in this environment.
+mineru_root: /home/byhou/outputs/mineru2.5-pro/DocBank
+source_image_root: sources/DocBank_500K/DocBank_500K_ori_images
+mineru_subdir: vlm
+
+adapter: mineru
+annotation_format: MinerU output
+image_extensions:
+  - .jpg
+  - .jpeg
+  - .png
+  - .webp
+
+supported_tasks:
+  - layout
+  - table
+  - formula
+  - text
+export_tasks:
+  - layout
+  - table
+  - formula
+  - text
+
+processing:
+  owner: Boyu Hou
+  date: "2026-04-25"
+  known_issues: []
+  export_notes: []
+
+shard_size: 10000
+allow_unreadable_images: true
+skip_errors: false

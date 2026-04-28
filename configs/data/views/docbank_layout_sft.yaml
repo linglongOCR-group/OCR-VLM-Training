@@ -1,0 +1,22 @@
+name: DocBank_500K_layout_sft
+description: "SFT view — DocBank_500K layout detection only"
+stage: sft
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/DocBank_500K_layout_sft
+
+include:
+  - task: layout
+    sources: [DocBank_500K]
+
+target_serialization:
+  layout: mineru_layout_box_v1
+
+split_policy:
+  level: document
+  seed: 42
+  train_ratio: 0.98
+  val_ratio: 0.01

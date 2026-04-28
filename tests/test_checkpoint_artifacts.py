@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.callbacks.save_and_eval import CheckpointArtifactMetadata, register_checkpoint_reference
+from verl_plugins.callbacks.save_and_eval import CheckpointArtifactMetadata, register_checkpoint_reference
 
 
 class FakeArtifact:

@@ -1,5 +1,5 @@
-from src.rewards.aggregate import compute_score
-from src.rewards.common import normalized_levenshtein_reward
+from verl_plugins.rewards.aggregate import compute_score
+from verl_plugins.rewards.common import normalized_levenshtein_reward
 
 
 def test_normalized_levenshtein_reward_exact_match():
