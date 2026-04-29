@@ -15,6 +15,11 @@ include:
 target_serialization:
   layout: mineru_layout_box_v1
 
+image_policy:
+  materialization:
+    mode: embedded_bytes
+    cache_assets: false
+
 split_policy:
   level: document
   seed: 42

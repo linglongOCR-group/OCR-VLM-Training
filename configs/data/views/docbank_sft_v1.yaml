@@ -24,6 +24,11 @@ target_serialization:
   formula: latex_plain_v1
   text: plain_text_v1
 
+image_policy:
+  materialization:
+    mode: embedded_bytes
+    cache_assets: false
+
 split_policy:
   level: document
   seed: 42

@@ -29,6 +29,11 @@ image_transform:
     pad_to_square: false
     resize_to: 1036
 
+image_policy:
+  materialization:
+    mode: embedded_bytes
+    cache_assets: false
+
 reward_profile:
   default: normalized_levenshtein_v1
 

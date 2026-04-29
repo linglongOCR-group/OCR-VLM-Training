@@ -1,5 +1,6 @@
 checkpoints/
 kernel_meta/
+outputs/
 wandb.key
 .claude/
 .codex

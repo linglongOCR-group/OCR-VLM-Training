@@ -40,6 +40,19 @@ def _image_count(images: Any) -> int:
     return len(_as_list(images))
 
 
+def _invalid_images(images: Any) -> list[Any]:
+    invalid = []
+    for image in _as_list(images):
+        if not isinstance(image, dict):
+            invalid.append(image)
+            continue
+        has_bytes = bool(image.get("bytes"))
+        has_path = bool(image.get("image"))
+        if has_bytes == has_path:
+            invalid.append(image)
+    return invalid
+
+
 def _iter_files(paths: Iterable[str | Path]) -> Iterable[Path]:
     for raw_path in paths:
         path = Path(raw_path)
@@ -66,6 +79,8 @@ def validate_grpo_view(paths: Iterable[str | Path], max_rows_per_file: int = 100
                     f"{path}:{row_index} sample_id={sample_id} has {placeholders} '<image>' placeholders "
                     f"but {images} images. Re-export the GRPO view with the current tools.data_management.views exporter."
                 )
+            if invalid := _invalid_images(row["images"]):
+                raise ValueError(f"{path}:{row_index} has invalid image references: {invalid[:1]}")
 
 
 def main() -> None:

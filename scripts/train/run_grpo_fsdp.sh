@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/cann-8.5.0/share/info/ascendnpu-ir/bin/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+
 PROJECT_ROOT=${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 export PROJECT_ROOT
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"

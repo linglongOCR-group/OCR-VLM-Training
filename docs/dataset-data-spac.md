@@ -963,9 +963,8 @@ image_policy:
         pad_to_multiple: 28
 
   materialization:
-    mode: cached
-    output_format: webp
-    quality: 95
+    mode: embedded_bytes
+    cache_assets: false
 
   runtime_transforms:
     enabled: false
@@ -973,11 +972,14 @@ image_policy:
 
 Supported materialization modes:
 
-| Mode               | Meaning                                                                   |
-| ------------------ | ------------------------------------------------------------------------- |
-| `cached`           | Generate and store view-specific images under `views/<view_name>/assets/` |
-| `runtime`          | Store canonical image paths and transform config only                     |
-| `source_reference` | Use canonical assets directly                                             |
+| Mode               | Meaning                                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `embedded_bytes`   | Store the runtime image directly in Parquet as `images: [{"bytes": <binary>}]`           |
+| `cached`           | Generate view assets and store runtime image references as `images: [{"image": <path>}]` |
+| `runtime`          | Store canonical image paths and transform config only                                    |
+| `source_reference` | Use canonical assets directly                                                            |
+
+`embedded_bytes` is the default for portable VERL views. `image_path` remains a lineage/debug field and must not be required by the training runtime in this mode.
 
 ---
 
@@ -988,8 +990,8 @@ Supported materialization modes:
 | Source                 | Raw images/PDFs        | Original                 |
 | Canonical              | Rendered pages         | PNG                      |
 | Canonical              | Region crops           | PNG                      |
-| View                   | Cached training images | PNG or high-quality WebP |
-| Debug portable dataset | Embedded image bytes   | Optional only            |
+| View                   | Embedded runtime image bytes | PNG or high-quality WebP |
+| View                   | Cached training images       | PNG or high-quality WebP |
 
 Default recommendation:
 
@@ -1002,8 +1004,8 @@ canonical_image_policy:
 
 view_image_policy:
   materialization:
-    output_format: webp
-    quality: 95
+    mode: embedded_bytes
+    cache_assets: false
 ```
 
 For OCR, table, formula, and diagram tasks, avoid low-quality JPEG by default.
@@ -1234,9 +1236,8 @@ image_policy:
     text: canonical_region_crop
 
   materialization:
-    mode: cached
-    output_format: webp
-    quality: 95
+    mode: embedded_bytes
+    cache_assets: false
 
 lineage:
   canonical_snapshot: "canonical-20260424"
@@ -1254,7 +1255,9 @@ Recommended columns:
 | -------------------------- | ----------- | -------: | ----------------------------------- |
 | `id`                       | string      |      Yes | Unique view record ID               |
 | `task`                     | string      |      Yes | Task name                           |
-| `image_path`               | string      |      Yes | Actual image path used for training |
+| `image_path`               | string      |      Yes | Lineage/debug image path            |
+| `images`                   | list        |      Yes | VERL runtime image input            |
+| `messages`                 | list/null   | Optional | VERL SFT conversation               |
 | `prompt`                   | string      |      Yes | Model input prompt                  |
 | `label`                    | string      |      Yes | Target output string                |
 | `source_name`              | string      |      Yes | Source dataset                      |
@@ -1275,7 +1278,8 @@ Example:
 {
   "id": "view:mineru25_sft_v1:000001",
   "task": "table",
-  "image_path": "views/mineru25_sft_v1/assets/table/source=DocBank/000001.webp",
+  "image_path": "canonical/assets/regions/source=DocBank/doc/page_region.png",
+  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
   "prompt": "<image>\nTable Recognition:",
   "label": "<fcel>Revenue<fcel>Amount<nl><fcel>2025<fcel>100",
   "source_name": "DocBank",
@@ -1853,4 +1857,3 @@ The most important final decisions are:
 8. **Generate prompts and model-specific labels only in the View layer.**
 9. **Use manifests and generated statistics instead of redundant metadata files in every directory.**
 10. **Ensure every training record can be traced back to canonical records, canonical assets, and original source files.**
-

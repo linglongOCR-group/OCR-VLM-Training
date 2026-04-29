@@ -12,6 +12,7 @@ from tools.data_management.config import load_processing_config
 from tools.data_management.prompts import load_prompt_config, resolve_prompt
 from tools.data_management.serializers.layout_mineru import MinerULayoutSerializer
 from tools.data_management.sources.adapters.mineru import MinerUExportOptions, MinerUSourceAdapter
+from tools.data_management.validate_grpo_view import validate_grpo_view
 from tools.data_management.views import ViewBuilder, reward_smoke_test, score_predictions, validate_view
 
 
@@ -19,6 +20,10 @@ def _minimal_png(width: int = 100, height: int = 200) -> bytes:
     buf = BytesIO()
     Image.new("RGB", (width, height), (255, 255, 255)).save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _decode_png(image_bytes: bytes) -> Image.Image:
+    return Image.open(BytesIO(image_bytes))
 
 
 def _write_fake_mineru_dataset(root: Path, source_root: Path, sample: str = "paper_001") -> None:
@@ -228,9 +233,11 @@ def test_build_sft_and_rlvr_views(tmp_path):
     assert set(train["stage"]) == {"rlvr"}
     assert set(train["reward_profile_id"]) == {"normalized_levenshtein_v1"}
     assert all(row["label"] == row["answer_key"] == row["reward_payload"]["label"] for _, row in train.iterrows())
+    validate_grpo_view([view_root])
     # VERL compatibility columns
     for column in ("images", "data_source", "extra_info"):
         assert column in train.columns, f"missing column {column}"
+    assert "image_bytes" not in train.columns
     for _, row in train.iterrows():
         assert row["data_source"] == row["task"]
         assert row["extra_info"]["sample_id"] == row["id"]
@@ -238,12 +245,43 @@ def test_build_sft_and_rlvr_views(tmp_path):
         assert hasattr(row["images"], "__len__")
         assert len(row["images"]) == 1
         assert isinstance(row["images"][0], dict)
-        assert "image" in row["images"][0]
+        assert "bytes" in row["images"][0]
+        assert "image" not in row["images"][0]
+        assert _decode_png(row["images"][0]["bytes"]).size[0] > 0
+        assert row["image_path"]
     smoke = reward_smoke_test(view_root)
     assert smoke["min_score"] == 1.0
 
 
-def test_view_image_assets_with_transform(tmp_path):
+def test_build_sft_view_embeds_images_and_messages(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "mineru25_sft"
+    config = {
+        "name": "mineru25_sft",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+        "target_serialization": {"text": "plain_text_v1"},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    validate_view(view_root)
+    train = pd.read_parquet(view_root / "train.parquet")
+    row = train.iloc[0]
+
+    assert "image_bytes" not in train.columns
+    assert _decode_png(row["images"][0]["bytes"]).size[0] > 0
+    assert "image" not in row["images"][0]
+    assert len(row["messages"]) == 2
+    assert row["messages"][0]["role"] == "user"
+    assert "<image>" in row["messages"][0]["content"]
+    assert row["messages"][1]["role"] == "assistant"
+    assert row["messages"][1]["content"] == row["label"]
+
+
+def test_view_image_bytes_with_transform(tmp_path):
     canonical_root = _export_fake_canonical(tmp_path)
     view_root = tmp_path / "views" / "test_transform_view"
     config = {
@@ -275,15 +313,46 @@ def test_view_image_assets_with_transform(tmp_path):
 
     for _, row in layout_rows.iterrows():
         assert row["view_image_asset_id"] is not None
-        assert row["images"][0]["image"].startswith(str(view_root / "assets" / "layout"))
-        assert Path(row["image_path"]).exists()
-        assert Path(row["image_path"]).stem == row["view_image_asset_id"]
+        assert "image_bytes" not in train.columns
+        assert _decode_png(row["images"][0]["bytes"]).size == (128, 128)
+        assert "<|box_start|>300 100 700 200<|box_end|>" in row["label"]
+        assert row["image_path"]
 
     for _, row in text_rows.iterrows():
         assert row["view_image_asset_id"] is not None
         assert isinstance(row["images"][0], dict)
-        assert "image" in row["images"][0]
-        assert row["image_path"] == row["images"][0]["image"]
+        assert "bytes" in row["images"][0]
+        assert "image_bytes" not in train.columns
+        assert row["image_path"]
+
+
+def test_view_image_assets_with_cached_policy(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "test_cached_view"
+    config = {
+        "name": "test_cached_view",
+        "stage": "rlvr",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "layout", "sources": ["FakeMinerU"]}],
+        "target_serialization": {"layout": "mineru_layout_box_v1"},
+        "image_policy": {"materialization": {"mode": "cached"}},
+        "image_transform": {"layout": {"pad_to_square": True, "resize_to": 128}},
+        "reward_profile": {"default": "normalized_levenshtein_v1"},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    validate_view(view_root, require_images=True)
+    validate_grpo_view([view_root])
+    train = pd.read_parquet(view_root / "train.parquet")
+    row = train.iloc[0]
+
+    assert row["images"][0]["image"].startswith(str(view_root / "assets" / "layout"))
+    assert "bytes" not in row["images"][0]
+    assert "image_bytes" not in train.columns
+    assert Path(row["image_path"]).exists()
+    assert Path(row["image_path"]).stem == row["view_image_asset_id"]
 
     # View asset files exist on disk
     assets_dir = view_root / "assets" / "layout"

@@ -163,6 +163,7 @@ class ViewBuilder:
             "asset_manifest": self.canonical_reader.read_asset_manifest(),
             "prompt_config": load_prompt_config(config.get("prompt_profile") or config.get("model_family") or "default"),
             "image_transform_config": config.get("image_transform") or {},
+            "image_materialization": _resolve_image_materialization(config),
             "view_name": config.get("name"),
         }
 
@@ -190,27 +191,34 @@ class ViewBuilder:
             "image_transform": image_transform,
         }
         label = serializer.serialize(record, context)
-        image_bytes = _transform_and_encode(asset.get("path"), image_transform)
+        runtime_image_data = _transform_and_encode(asset.get("path"), image_transform)
+        if runtime_image_data is None:
+            runtime_image_data = _read_image_file_bytes(asset.get("path"))
         canonical_image_path = str(asset.get("path") or record["image_asset_id"])
         content_hash = stable_hash(record["record_id"] + prompt_template_id)
         view_id = stable_id("view", view_name, content_hash)
         view_asset_id = stable_id("view_asset", view_name, task, content_hash)
-        if image_transform and image_bytes is not None:
-            view_asset_path = _save_view_asset(
-                image_bytes, view_asset_id, task,
-                ctx["view_assets_dir"]
-            )
-            view_image_path = view_asset_path
+        image_materialization = ctx["image_materialization"]
+        image_mode = image_materialization["mode"]
+        cache_assets = bool(image_materialization["cache_assets"])
+        view_image_path = canonical_image_path
+        if image_mode == "embedded_bytes":
+            if cache_assets and runtime_image_data is not None:
+                view_image_path = _save_view_asset(runtime_image_data, view_asset_id, task, ctx["view_assets_dir"])
+            images_column = [{"bytes": runtime_image_data}] if runtime_image_data is not None else [{"image": view_image_path}]
         else:
-            raw_bytes = _read_image_bytes(asset.get("path"))
-            if raw_bytes is not None:
+            if image_mode == "cached" and runtime_image_data is not None:
                 view_image_path = _save_view_asset(
-                    raw_bytes, view_asset_id, task,
+                    runtime_image_data, view_asset_id, task,
                     ctx["view_assets_dir"]
                 )
-            else:
-                view_image_path = canonical_image_path
-        images_column = [{"image": view_image_path}]
+            images_column = [{"image": view_image_path}]
+        messages = None
+        if stage == "sft":
+            messages = [
+                {"role": "user", "content": prompt_text},
+                {"role": "assistant", "content": label},
+            ]
 
         view_record = ViewRecord(
             id=view_id,
@@ -229,10 +237,10 @@ class ViewBuilder:
             prompt_template_id=prompt_template_id,
             split=split,  # type: ignore[arg-type]
             view_image_asset_id=view_asset_id,
-            image_bytes=image_bytes,
             images=images_column,
             data_source=task,
             extra_info={"sample_id": view_id, "task_type": task},
+            messages=messages,
             metadata={"canonical_target": record.get("target"), "category": record.get("category")},
         )
         if stage == "rlvr":
@@ -263,6 +271,18 @@ def _default_serializer_for_task(task: str) -> str:
 def _reward_profile_for_task(config: dict[str, Any], task: str) -> str:
     by_task = config.get("by_task") or {}
     return by_task.get(task) or config.get("default") or "normalized_levenshtein_v1"
+
+
+def _resolve_image_materialization(config: dict[str, Any]) -> dict[str, Any]:
+    materialization = ((config.get("image_policy") or {}).get("materialization") or {})
+    mode = materialization.get("mode") or "embedded_bytes"
+    path_modes = {"cached", "path", "source_reference", "runtime"}
+    if mode not in {"embedded_bytes", *path_modes}:
+        raise ValueError(f"unsupported image materialization mode: {mode}")
+    cache_assets = bool(materialization.get("cache_assets", mode == "cached"))
+    if mode in path_modes:
+        cache_assets = mode == "cached"
+    return {"mode": mode, "cache_assets": cache_assets}
 
 
 def _filter_rows(rows: list[dict[str, Any]], where: dict[str, Any]) -> list[dict[str, Any]]:
@@ -341,7 +361,7 @@ def _resolve_image_transform(
     }
 
 
-def _read_image_bytes(image_path: str | None) -> bytes | None:
+def _read_image_file_bytes(image_path: str | None) -> bytes | None:
     """Read a raw image file into bytes for inline Parquet storage."""
     if not image_path:
         return None
@@ -351,12 +371,12 @@ def _read_image_bytes(image_path: str | None) -> bytes | None:
         return None
 
 
-def _save_view_asset(image_bytes: bytes, asset_id: str, task: str, assets_dir: Path) -> str:
+def _save_view_asset(image_data: bytes, asset_id: str, task: str, assets_dir: Path) -> str:
     """Write image bytes to ``{assets_dir}/{task}/{asset_id}.png``, returning the absolute path."""
     task_dir = assets_dir / task
     task_dir.mkdir(parents=True, exist_ok=True)
     asset_path = task_dir / f"{asset_id}.png"
-    asset_path.write_bytes(image_bytes)
+    asset_path.write_bytes(image_data)
     return str(asset_path)
 
 

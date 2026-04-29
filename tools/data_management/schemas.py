@@ -213,10 +213,9 @@ class ViewRecord:
     prompt_template_id: str
     split: Literal["train", "val", "test"]
     view_image_asset_id: str | None = None
-    image_bytes: bytes | None = None
     images: list | None = None
     system_prompt: str | None = None
-    messages: str | None = None
+    messages: list | None = None
     data_source: str | None = None
     extra_info: JsonDict = field(default_factory=dict)
     metadata: JsonDict = field(default_factory=dict)

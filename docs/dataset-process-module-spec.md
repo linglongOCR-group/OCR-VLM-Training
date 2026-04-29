@@ -792,7 +792,8 @@ All views should contain:
 | `id`                  |      Yes | View record ID                |
 | `stage`               |      Yes | `sft`, `rlvr`, or `eval`      |
 | `task`                |      Yes | Task name                     |
-| `image_path`          |      Yes | Actual training image path    |
+| `image_path`          |      Yes | Lineage/debug image path      |
+| `images`              |      Yes | VERL runtime image input      |
 | `prompt`              |      Yes | Model input prompt            |
 | `label`               |      Yes | Ground-truth label string     |
 | `source_name`         |      Yes | Source dataset                |
@@ -813,14 +814,17 @@ For SFT, the minimum is:
 
 ```text
 image_path
+images
 prompt
 label
+messages
 ```
 
 Recommended additional columns:
 
 | Column              | Description                     |
 | ------------------- | ------------------------------- |
+| `messages`          | VERL SFT user/assistant turns    |
 | `loss_mask_policy`  | Optional token loss mask policy |
 | `max_target_length` | Optional target length control  |
 | `difficulty`        | Optional sampling metadata      |
@@ -832,8 +836,13 @@ Example:
   "id": "view:sft:minneru25:000001",
   "stage": "sft",
   "task": "table",
-  "image_path": "views/mineru25_sft_v1/assets/table/000001.webp",
+  "image_path": "canonical/assets/regions/source=DocBank/000001.png",
+  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
   "prompt": "<image>\nTable Recognition:",
+  "messages": [
+    {"role": "user", "content": "<image>\nTable Recognition:"},
+    {"role": "assistant", "content": "<fcel>Revenue<fcel>Amount<nl><fcel>2025<fcel>100"}
+  ],
   "label": "<fcel>Revenue<fcel>Amount<nl><fcel>2025<fcel>100",
   "canonical_record_id": "table:DocBank:region_000002",
   "target_format": "enhanced_otsl_v1",
@@ -863,7 +872,8 @@ Example with Levenshtein reward:
   "id": "view:rlvr:minneru25:000001",
   "stage": "rlvr",
   "task": "table",
-  "image_path": "views/mineru25_rlvr_v1/assets/table/000001.webp",
+  "image_path": "canonical/assets/regions/source=DocBank/000001.png",
+  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
   "prompt": "<image>\nTable Recognition:",
   "label": "<fcel>Revenue<fcel>Amount<nl><fcel>2025<fcel>100",
   "answer_key": "<fcel>Revenue<fcel>Amount<nl><fcel>2025<fcel>100",
@@ -883,7 +893,8 @@ Example with TEDS reward:
   "id": "view:rlvr:table_teds:000001",
   "stage": "rlvr",
   "task": "table",
-  "image_path": "views/table_teds_rlvr_v1/assets/table/000001.webp",
+  "image_path": "canonical/assets/regions/source=DocBank/000001.png",
+  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
   "prompt": "<image>\nTable Recognition:",
   "label": "<table>...</table>",
   "reward_profile_id": "table_teds_v1",
@@ -974,9 +985,8 @@ target_serialization:
 
 image_policy:
   materialization:
-    mode: cached
-    output_format: webp
-    quality: 95
+    mode: embedded_bytes
+    cache_assets: false
 
 split_policy:
   level: document
@@ -1024,9 +1034,8 @@ reward_payload:
 
 image_policy:
   materialization:
-    mode: cached
-    output_format: webp
-    quality: 95
+    mode: embedded_bytes
+    cache_assets: false
 ```
 
 In this initial mode, SFT and RLVR labels are essentially the same.
@@ -1078,9 +1087,8 @@ reward_payload:
 
 image_policy:
   materialization:
-    mode: cached
-    output_format: webp
-    quality: 95
+    mode: embedded_bytes
+    cache_assets: false
 ```
 
 ---
@@ -1127,11 +1135,13 @@ Recommended default:
 
 | VERL Concept     | View Column                             |
 | ---------------- | --------------------------------------- |
-| Multimodal input | `image_path`                            |
+| Multimodal input | `images` with `{"bytes": <binary>}`     |
 | Prompt           | `prompt`                                |
 | Ground truth     | `label` or `answer_key`                 |
 | Reward config    | `reward_profile_id`                     |
 | Reward payload   | `reward_payload` or `reward_payload_id` |
+
+`image_path` is retained for lineage and debugging. Path-backed runtime images are only recommended when the view config explicitly uses `image_policy.materialization.mode: cached`, `runtime`, or `source_reference`.
 
 ---
 
@@ -1687,4 +1697,3 @@ This design preserves the practicality of the current training workflow while av
 [1]: https://arxiv.org/html/2412.07626v1 "OmniDocBench: Benchmarking Diverse PDF Document Parsing with Comprehensive Annotations"
 [2]: https://arxiv.org/html/2510.19817v1 "olmOCR 2 Unit Test Rewards for Document OCR"
 [3]: https://arxiv.org/abs/2409.03643 "[2409.03643] Image Over Text: Transforming Formula Recognition Evaluation with Character Detection Matching"
-
