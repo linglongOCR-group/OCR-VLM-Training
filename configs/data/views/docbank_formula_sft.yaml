@@ -17,8 +17,7 @@ target_serialization:
 
 image_policy:
   materialization:
-    mode: embedded_bytes
-    cache_assets: false
+    mode: embedded
 
 split_policy:
   level: document
