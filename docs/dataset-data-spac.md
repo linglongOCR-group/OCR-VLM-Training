@@ -83,7 +83,7 @@ It owns:
 * Model-specific output labels
 * Task/source/category sampling policies
 * Train/validation/test splits
-* Optional cached model-specific image derivatives
+* Optional model-specific image derivatives
 * Final Parquet files consumed by VERL or other training frameworks
 
 The View layer is allowed to be redundant because it is a materialized training dataset.
@@ -963,8 +963,7 @@ image_policy:
         pad_to_multiple: 28
 
   materialization:
-    mode: embedded_bytes
-    cache_assets: false
+    mode: embedded
 
   runtime_transforms:
     enabled: false
@@ -972,14 +971,26 @@ image_policy:
 
 Supported materialization modes:
 
-| Mode               | Meaning                                                                                  |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| `embedded_bytes`   | Store the runtime image directly in Parquet as `images: [{"bytes": <binary>}]`           |
-| `cached`           | Generate view assets and store runtime image references as `images: [{"image": <path>}]` |
-| `runtime`          | Store canonical image paths and transform config only                                    |
-| `source_reference` | Use canonical assets directly                                                            |
+| Mode               | Meaning                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------- |
+| `embedded`         | Store runtime images in Parquet as flat `images_bytes: list<binary>`                        |
+| `source_reference` | Copy or transform selected images into `views/<view>/assets/` and reference filenames only  |
 
-`embedded_bytes` is the default for portable VERL views. `image_path` remains a lineage/debug field and must not be required by the training runtime in this mode.
+`embedded` is the default for portable VERL views. `image_path` remains a lineage/debug field and must not be required by the training runtime in embedded mode.
+
+For `source_reference`, the view builder still reads from the canonical asset path, but the runtime values written to `images_path` are filenames only. The files themselves are materialized under `views/<view>/assets/`. If an image transform is configured, the transformed PNG is written; otherwise the original image bytes are copied with their original extension.
+
+Large embedded-byte views should use explicit sharding:
+
+```yaml
+shard_policy:
+  rows_per_shard: 128
+```
+
+This writes `train/part-00000.parquet`, `train/part-00001.parquet`, and so on.
+For VERL SFT, pass the expanded shard file list to `data.train_files`; passing a
+single very large nested binary Parquet can trigger pyarrow/pandas chunked-array
+conversion errors.
 
 ---
 
@@ -991,7 +1002,7 @@ Supported materialization modes:
 | Canonical              | Rendered pages         | PNG                      |
 | Canonical              | Region crops           | PNG                      |
 | View                   | Embedded runtime image bytes | PNG or high-quality WebP |
-| View                   | Cached training images       | PNG or high-quality WebP |
+| View                   | Source-reference training images | PNG or high-quality WebP |
 
 Default recommendation:
 
@@ -1004,8 +1015,7 @@ canonical_image_policy:
 
 view_image_policy:
   materialization:
-    mode: embedded_bytes
-    cache_assets: false
+    mode: embedded
 ```
 
 For OCR, table, formula, and diagram tasks, avoid low-quality JPEG by default.
@@ -1154,11 +1164,19 @@ views/<view_name>/
   train.parquet
   val.parquet
   test.parquet
+  train/
+    part-00000.parquet
+    part-00001.parquet
   stats.json
   assets/
   manifests/
     asset_manifest.parquet
 ```
+
+For small views, each split may be a single `<split>.parquet` file. For large
+embedded-image views, prefer sharded split directories (`train/part-*.parquet`,
+`val/part-*.parquet`, `test/part-*.parquet`) so VERL/pandas reads one bounded
+file at a time.
 
 ---
 
@@ -1236,8 +1254,7 @@ image_policy:
     text: canonical_region_crop
 
   materialization:
-    mode: embedded_bytes
-    cache_assets: false
+    mode: embedded
 
 lineage:
   canonical_snapshot: "canonical-20260424"
@@ -1256,7 +1273,8 @@ Recommended columns:
 | `id`                       | string      |      Yes | Unique view record ID               |
 | `task`                     | string      |      Yes | Task name                           |
 | `image_path`               | string      |      Yes | Lineage/debug image path            |
-| `images`                   | list        |      Yes | VERL runtime image input            |
+| `images_bytes`             | list<binary>| Optional | Embedded runtime image bytes        |
+| `images_path`              | list<string>| Optional | Source-reference asset filenames    |
 | `messages`                 | list/null   | Optional | VERL SFT conversation               |
 | `prompt`                   | string      |      Yes | Model input prompt                  |
 | `label`                    | string      |      Yes | Target output string                |
@@ -1279,7 +1297,8 @@ Example:
   "id": "view:mineru25_sft_v1:000001",
   "task": "table",
   "image_path": "canonical/assets/regions/source=DocBank/doc/page_region.png",
-  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
+  "images_bytes": ["<binary PNG or WebP bytes>"],
+  "images_path": null,
   "prompt": "<image>\nTable Recognition:",
   "label": "<fcel>Revenue<fcel>Amount<nl><fcel>2025<fcel>100",
   "source_name": "DocBank",
@@ -1804,9 +1823,7 @@ canonical:
 
 view:
   output_format: parquet
-  image_materialization: cached
-  cached_image_format: webp
-  cached_image_quality: 95
+  image_materialization: source_reference
   split_level: document
 
 lineage:

@@ -793,7 +793,8 @@ All views should contain:
 | `stage`               |      Yes | `sft`, `rlvr`, or `eval`      |
 | `task`                |      Yes | Task name                     |
 | `image_path`          |      Yes | Lineage/debug image path      |
-| `images`              |      Yes | VERL runtime image input      |
+| `images_bytes`        | Optional | Embedded runtime image bytes  |
+| `images_path`         | Optional | Source-reference filenames    |
 | `prompt`              |      Yes | Model input prompt            |
 | `label`               |      Yes | Ground-truth label string     |
 | `source_name`         |      Yes | Source dataset                |
@@ -814,7 +815,7 @@ For SFT, the minimum is:
 
 ```text
 image_path
-images
+images_bytes or images_path
 prompt
 label
 messages
@@ -837,7 +838,8 @@ Example:
   "stage": "sft",
   "task": "table",
   "image_path": "canonical/assets/regions/source=DocBank/000001.png",
-  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
+  "images_bytes": ["<binary PNG or WebP bytes>"],
+  "images_path": null,
   "prompt": "<image>\nTable Recognition:",
   "messages": [
     {"role": "user", "content": "<image>\nTable Recognition:"},
@@ -873,7 +875,8 @@ Example with Levenshtein reward:
   "stage": "rlvr",
   "task": "table",
   "image_path": "canonical/assets/regions/source=DocBank/000001.png",
-  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
+  "images_bytes": ["<binary PNG or WebP bytes>"],
+  "images_path": null,
   "prompt": "<image>\nTable Recognition:",
   "label": "<fcel>Revenue<fcel>Amount<nl><fcel>2025<fcel>100",
   "answer_key": "<fcel>Revenue<fcel>Amount<nl><fcel>2025<fcel>100",
@@ -894,7 +897,8 @@ Example with TEDS reward:
   "stage": "rlvr",
   "task": "table",
   "image_path": "canonical/assets/regions/source=DocBank/000001.png",
-  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
+  "images_bytes": ["<binary PNG or WebP bytes>"],
+  "images_path": null,
   "prompt": "<image>\nTable Recognition:",
   "label": "<table>...</table>",
   "reward_profile_id": "table_teds_v1",
@@ -985,8 +989,7 @@ target_serialization:
 
 image_policy:
   materialization:
-    mode: embedded_bytes
-    cache_assets: false
+    mode: embedded
 
 split_policy:
   level: document
@@ -1034,8 +1037,10 @@ reward_payload:
 
 image_policy:
   materialization:
-    mode: embedded_bytes
-    cache_assets: false
+    mode: embedded
+
+shard_policy:
+  rows_per_shard: 128
 ```
 
 In this initial mode, SFT and RLVR labels are essentially the same.
@@ -1087,8 +1092,7 @@ reward_payload:
 
 image_policy:
   materialization:
-    mode: embedded_bytes
-    cache_assets: false
+    mode: embedded
 ```
 
 ---
@@ -1135,13 +1139,26 @@ Recommended default:
 
 | VERL Concept     | View Column                             |
 | ---------------- | --------------------------------------- |
-| Multimodal input | `images` with `{"bytes": <binary>}`     |
+| Multimodal input | `images_bytes` or `images_path`         |
 | Prompt           | `prompt`                                |
 | Ground truth     | `label` or `answer_key`                 |
 | Reward config    | `reward_profile_id`                     |
 | Reward payload   | `reward_payload` or `reward_payload_id` |
 
-`image_path` is retained for lineage and debugging. Path-backed runtime images are only recommended when the view config explicitly uses `image_policy.materialization.mode: cached`, `runtime`, or `source_reference`.
+`image_path` is retained for lineage and debugging. `embedded` mode writes `images_bytes: list<binary>` and leaves `images_path` null. `source_reference` mode copies identity images or writes transformed images under `views/<view>/assets/`, then writes filenames only into `images_path` and leaves `images_bytes` null. VERL integration uses the repo-local dataset wrapper to convert either column into VERL's in-memory image input shape at load time.
+
+For large embedded-image SFT or RLVR views, write sharded split outputs with:
+
+```yaml
+shard_policy:
+  rows_per_shard: 128
+```
+
+The builder writes `train/part-*.parquet`, `val/part-*.parquet`, and
+`test/part-*.parquet` instead of a single split file. VERL SFT reads each file
+with `pd.read_parquet(..., dtype_backend="pyarrow")`, so training launch configs
+should pass the expanded shard file list rather than one large nested binary
+Parquet.
 
 ---
 

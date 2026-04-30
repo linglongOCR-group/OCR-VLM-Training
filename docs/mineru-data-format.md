@@ -91,12 +91,25 @@ When these records are materialized as portable VERL view Parquet, the runtime i
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "<image>\nLayout Detection:"}
   ],
-  "images": [{"bytes": "<binary PNG or WebP bytes>"}],
+  "images_bytes": ["<binary PNG or WebP bytes>"],
+  "images_path": null,
   "image_path": "canonical asset path kept only for lineage/debugging"
 }
 ```
 
-Path-backed runtime images remain valid only for explicit cached/path view modes.
+Path-backed runtime images are represented only by `source_reference` mode. In that mode, runtime filenames in `images_path` refer to images copied or transformed into the view's own `assets/` directory; absolute source or canonical paths are not written as runtime image references.
+
+For large embedded-byte views used by VERL SFT, shard the split output so each
+file can be read independently by pandas/pyarrow:
+
+```yaml
+shard_policy:
+  rows_per_shard: 128
+```
+
+This produces files such as `train/part-00000.parquet` whose `images_bytes`
+column contains flat binary image bytes. Pass the expanded shard file list
+to VERL `data.train_files`.
 
 `mineru-vl-utils` uses `"You are a helpful assistant."` as the default system prompt. ([GitHub][5]) For Hugging Face `transformers` inference, the client builds chat-template messages with a system message, image content, and text prompt; by default the image is placed before the text unless `<image>` appears explicitly in the prompt. ([GitHub][6])
 
@@ -454,7 +467,7 @@ Recommended JSONL fields:
 {
   "id": "string, globally unique",
   "task": "layout | text | table | equation | image_analysis | chart_analysis",
-  "images": ["relative/path.png in source JSONL; [{\"bytes\": <binary>}] in portable VERL view Parquet"],
+  "images": ["relative/path.png in source JSONL; images_bytes or images_path in portable VERL view Parquet"],
   "block_type": "optional block type for crop-level records",
   "bbox": "optional normalized bbox for crop-level records",
   "angle": "optional 0|90|180|270|null",
