@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 
 from tools.data_management.canonical.validator import validate_canonical
 from tools.data_management.config.resolver import load_processing_config, resolve_source_config
 from tools.data_management.lineage.resolver import LineageResolver
+from tools.data_management.progress import ProgressReporter
 from tools.data_management.registry.configured import configured_source_registry
 from tools.data_management.views import ViewBuilder, reward_smoke_test, score_predictions, validate_view
 
@@ -25,6 +28,7 @@ def main(argv: list[str] | None = None) -> None:
     export_source.add_argument("--skip-errors", action="store_true")
     export_source.add_argument("--allow-unreadable-images", action="store_true")
     export_source.add_argument("--overwrite-partitions", action="store_true", default=True)
+    _add_progress_args(export_source)
 
     validate_canonical_cmd = subparsers.add_parser("validate-canonical")
     validate_canonical_cmd.add_argument("--config")
@@ -36,6 +40,7 @@ def main(argv: list[str] | None = None) -> None:
     build_view.add_argument("view_config")
     build_view.add_argument("--config")
     build_view.add_argument("--overwrite", action="store_true", default=True)
+    _add_progress_args(build_view)
 
     validate_view_cmd = subparsers.add_parser("validate-view")
     validate_view_cmd.add_argument("view_root")
@@ -82,7 +87,13 @@ def main(argv: list[str] | None = None) -> None:
             or processing.canonical_root
         )
         tasks = args.tasks.split(",") if args.tasks else None
-        report = adapter.export(canonical_root, tasks=tasks, overwrite_partitions=args.overwrite_partitions)
+        progress = _make_progress(args, root=Path(canonical_root).parent)
+        report = adapter.export(
+            canonical_root,
+            tasks=tasks,
+            overwrite_partitions=args.overwrite_partitions,
+            progress=progress,
+        )
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         return
 
@@ -95,7 +106,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "build-view":
         builder = ViewBuilder.from_config_path(args.view_config, processing_config=args.config)
-        report = builder.build(args.view_config, overwrite=args.overwrite)
+        progress = _make_progress(args, root=_common_parent(builder.canonical_root, builder.view_root))
+        report = builder.build(args.view_config, overwrite=args.overwrite, progress=progress)
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         return
 
@@ -152,6 +164,25 @@ def _resolve_view_arg(value: str, processing) -> Path:
 def _view_arg_requires_dataset_root(value: str) -> bool:
     path = Path(value)
     return not path.is_absolute() and not path.exists()
+
+
+def _add_progress_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--progress", dest="progress", action="store_true", default=None)
+    group.add_argument("--no-progress", dest="progress", action="store_false")
+    parser.add_argument("--log-every", type=int, default=1000)
+    parser.add_argument("--quiet", action="store_true")
+
+
+def _make_progress(args: argparse.Namespace, *, root: Path | None) -> ProgressReporter:
+    if args.quiet:
+        return ProgressReporter.disabled()
+    enabled = bool(args.progress) if args.progress is not None else sys.stderr.isatty()
+    return ProgressReporter(enabled=enabled, log_every=args.log_every, root=root)
+
+
+def _common_parent(*paths: Path) -> Path:
+    return Path(os.path.commonpath([str(path.resolve()) for path in paths]))
 
 
 if __name__ == "__main__":

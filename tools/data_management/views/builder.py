@@ -14,6 +14,7 @@ from PIL import Image
 
 from tools.data_management.canonical.reader import CanonicalReader
 from tools.data_management.config.resolver import load_processing_config, resolve_path
+from tools.data_management.progress import ProgressReporter
 from tools.data_management.prompts import load_prompt_config, resolve_prompt
 from tools.data_management.registry.configured import configured_reward_registry, configured_serializer_registry
 from tools.data_management.registry.reward_registry import default_reward_registry
@@ -194,7 +195,13 @@ class ViewBuilder:
         view_root = resolve_path(view_root, base=config_path.parent, dataset_root=processing.dataset_root)
         return cls(canonical_root, view_root, processing_config=processing)
 
-    def build(self, view_config: dict[str, Any] | str | Path, *, overwrite: bool = True) -> ViewBuildReport:
+    def build(
+        self,
+        view_config: dict[str, Any] | str | Path,
+        *,
+        overwrite: bool = True,
+        progress: ProgressReporter | None = None,
+    ) -> ViewBuildReport:
         if isinstance(view_config, str | Path):
             config = read_yaml(view_config)
             config.setdefault("_config_path", str(view_config))
@@ -204,12 +211,22 @@ class ViewBuilder:
         stage = config.get("stage") or config.get("training_stage") or "sft"
         if stage not in {"sft", "rlvr", "eval"}:
             raise ValueError("view stage must be sft, rlvr, or eval")
+        if progress:
+            progress.log("build-view", phase="start", view=view_name, stage=stage, view_root=self.view_root)
         records = self._load_selected_records(config)
         records = self._apply_excludes(records, config.get("exclude") or [])
         records = self._apply_samples(records, config.get("sample") or [])
         split_map = self._assign_splits(records, config.get("split_policy") or {})
         materialize_ctx = self._build_materialize_context(config)
         rows_per_shard = _resolve_rows_per_shard(config)
+        if progress:
+            progress.log(
+                "build-view",
+                phase="selected",
+                total=len(records),
+                image_mode=materialize_ctx["image_materialization"]["mode"],
+                rows_per_shard=rows_per_shard,
+            )
         view_assets_dir = self.view_root / "assets"
         if overwrite:
             try:
@@ -221,11 +238,19 @@ class ViewBuilder:
         materialize_ctx["view_assets_dir"] = view_assets_dir
         output_dir = self.view_root
         output_dir.mkdir(parents=True, exist_ok=True)
-        schema = self._infer_view_schema(records, config, materialize_ctx, view_name=view_name, stage=stage, split_map=split_map)
+        schema = self._infer_view_schema(
+            records,
+            config,
+            materialize_ctx,
+            view_name=view_name,
+            stage=stage,
+            split_map=split_map,
+            progress=progress,
+        )
         writer = _SplitParquetWriter(output_dir, schema, rows_per_shard=rows_per_shard)
         materialize_ctx["asset_dir_resolver"] = writer.asset_dirs
         try:
-            for record in records:
+            for index, record in enumerate(records, start=1):
                 row = self._materialize(
                     record,
                     config,
@@ -235,6 +260,8 @@ class ViewBuilder:
                     split=split_map[record["record_id"]],
                 )
                 writer.write(row)
+                if progress:
+                    progress.update("build-view", index, total=len(records), phase="materialize")
             split_counts = writer.finish()
         except Exception:
             writer.abort()
@@ -248,6 +275,14 @@ class ViewBuilder:
             source_config = Path(config["_config_path"])
             if source_config.resolve() != target_config.resolve():
                 target_config.write_text(source_config.read_text())
+        if progress:
+            progress.finish(
+                "build-view",
+                total=sum(split_counts.values()),
+                view=view_name,
+                view_root=output_dir,
+                split_counts=split_counts,
+            )
         return ViewBuildReport(view_name=view_name, stage=stage, total_records=sum(split_counts.values()), split_counts=split_counts)
 
     def _infer_view_schema(
@@ -259,12 +294,13 @@ class ViewBuilder:
         view_name: str,
         stage: str,
         split_map: dict[str, str],
+        progress: ProgressReporter | None = None,
     ) -> pa.Schema:
         """Infer a stable parquet schema without loading image bytes."""
         schema_ctx = {**materialize_ctx, "schema_inference": True}
         schemas: list[pa.Schema] = []
         batch: list[dict[str, Any]] = []
-        for record in records:
+        for index, record in enumerate(records, start=1):
             row = self._materialize(
                 record,
                 config,
@@ -277,6 +313,8 @@ class ViewBuilder:
             if len(batch) >= 4096:
                 schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
                 batch = []
+            if progress:
+                progress.update("build-view", index, total=len(records), phase="infer-schema")
         if batch:
             schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
         if not schemas:

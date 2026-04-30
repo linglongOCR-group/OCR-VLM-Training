@@ -12,6 +12,7 @@ from PIL import Image
 
 from tools.data_management.canonical.writer import CanonicalWriteReport, CanonicalWriter
 from tools.data_management.config.resolver import resolve_path
+from tools.data_management.progress import ProgressReporter
 from tools.data_management.schemas import (
     AssetRecord,
     CanonicalDocument,
@@ -166,9 +167,18 @@ class HybridMessageSourceAdapter(SourceAdapter):
         *,
         tasks: list[str] | None = None,
         overwrite_partitions: bool = True,
+        progress: ProgressReporter | None = None,
     ) -> CanonicalWriteReport:
         selected_tasks = set(tasks or DEFAULT_TASKS)
         canonical_root = Path(canonical_root)
+        if progress:
+            progress.log(
+                "export-source",
+                phase="start",
+                source=self.options.dataset_name,
+                canonical_root=canonical_root,
+                tasks=sorted(selected_tasks),
+            )
         manifest_writer = CanonicalWriter(
             canonical_root, overwrite_partitions=overwrite_partitions
         )
@@ -216,6 +226,14 @@ class HybridMessageSourceAdapter(SourceAdapter):
             if self.options.max_samples is not None and report.scanned_samples >= self.options.max_samples:
                 break
             report.scanned_samples += 1
+            if progress:
+                progress.update(
+                    "export-source",
+                    report.scanned_samples,
+                    total=min(len(records), self.options.max_samples or len(records)),
+                    scanned=report.scanned_samples,
+                    record=idx,
+                )
             try:
                 exported = self._export_record(idx, record, selected_tasks)
             except Exception as exc:
@@ -223,6 +241,8 @@ class HybridMessageSourceAdapter(SourceAdapter):
                     {"record_index": str(idx), "error": str(exc)}
                 )
                 report.skipped_samples += 1
+                if progress:
+                    progress.log("export-source", phase="skip", record=idx, error=exc)
                 if not self.options.skip_errors:
                     raise
                 continue
@@ -243,6 +263,8 @@ class HybridMessageSourceAdapter(SourceAdapter):
             *task_writers.values(),
         ]:
             writer.close()
+            if progress and writer.count:
+                progress.log("export-source", phase="wrote", path=writer.output_dir, rows=writer.count)
 
         report.documents = document_writer.count
         report.pages = page_writer.count
@@ -262,6 +284,16 @@ class HybridMessageSourceAdapter(SourceAdapter):
                 "report": asdict(report),
             },
         )
+        if progress:
+            progress.finish(
+                "export-source",
+                total=report.scanned_samples,
+                source=self.options.dataset_name,
+                documents=report.documents,
+                records=sum(report.task_records.values()),
+                assets=report.assets,
+                skipped=report.skipped_samples,
+            )
         return CanonicalWriteReport(
             source_name=self.options.dataset_name,
             documents=report.documents,

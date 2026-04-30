@@ -1,5 +1,5 @@
 import json
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +9,7 @@ from PIL import Image
 from tools.data_management.canonical import validate_canonical
 from tools.data_management.cli import main as docds_main
 from tools.data_management.config import load_processing_config
+from tools.data_management.progress import ProgressReporter
 from tools.data_management.prompts import load_prompt_config, resolve_prompt
 from tools.data_management.serializers.layout_mineru import MinerULayoutSerializer
 from tools.data_management.sources.adapters.mineru import MinerUExportOptions, MinerUSourceAdapter
@@ -573,3 +574,117 @@ def test_score_predictions_cli_path(tmp_path):
 
     assert count == 1
     assert scores.iloc[0]["normalized_score"] == 1.0
+
+
+def test_canonical_export_progress_logs_relative_paths(tmp_path):
+    mineru_root = tmp_path / "mineru"
+    source_root = tmp_path / "source"
+    canonical_root = tmp_path / "canonical"
+    _write_fake_mineru_dataset(mineru_root, source_root)
+    stream = StringIO()
+    progress = ProgressReporter(enabled=True, log_every=1, stream=stream, root=tmp_path)
+
+    MinerUSourceAdapter(
+        MinerUExportOptions(
+            mineru_root=mineru_root,
+            source_image_root=source_root,
+            dataset_name="FakeMinerU",
+            allow_unreadable_images=True,
+        )
+    ).export(canonical_root, progress=progress)
+
+    logs = stream.getvalue()
+    assert "export-source" in logs
+    assert "FakeMinerU" in logs
+    assert "scanned=1" in logs
+    assert "canonical/entities/documents/source=FakeMinerU" in logs
+
+
+def test_view_build_progress_logs_relative_paths(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "mineru25_rlvr"
+    stream = StringIO()
+    progress = ProgressReporter(enabled=True, log_every=1, stream=stream, root=tmp_path)
+
+    ViewBuilder(canonical_root, view_root).build(
+        {
+            "name": "mineru25_rlvr",
+            "stage": "rlvr",
+            "model_family": "mineru2.5",
+            "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+            "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+            "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+            "reward_profile": {"default": "normalized_levenshtein_v1"},
+        },
+        progress=progress,
+    )
+
+    logs = stream.getvalue()
+    assert "build-view" in logs
+    assert "views/mineru25_rlvr" in logs
+    assert "materialize" in logs
+    assert "total=1" in logs
+
+
+def test_cli_build_view_progress_uses_stderr_and_keeps_stdout_json(tmp_path, capsys):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "mineru25_rlvr"
+    config_path = tmp_path / "view.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "mineru25_rlvr",
+                "stage": "rlvr",
+                "model_family": "mineru2.5",
+                "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+                "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+                "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+                "reward_profile": {"default": "normalized_levenshtein_v1"},
+            }
+        )
+    )
+
+    docds_main(["build-view", str(config_path), "--progress", "--log-every", "1"])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["total_records"] == 1
+    assert "build-view" in captured.err
+    assert "materialize" in captured.err
+
+
+def test_cli_export_source_progress_uses_stderr_and_keeps_stdout_json(monkeypatch, tmp_path, capsys):
+    mineru_root = tmp_path / "mineru"
+    source_root = tmp_path / "source"
+    canonical_root = tmp_path / "canonical"
+    monkeypatch.setenv("OCR_DATASET_ROOT", str(tmp_path))
+    _write_fake_mineru_dataset(mineru_root, source_root)
+    config_path = tmp_path / "source.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "dataset_name": "FakeMinerU",
+                "adapter": "mineru",
+                "mineru_root": str(mineru_root),
+                "source_image_root": str(source_root),
+            }
+        )
+    )
+
+    docds_main(
+        [
+            "export-source",
+            "mineru",
+            "--source-config",
+            str(config_path),
+            "--canonical-root",
+            str(canonical_root),
+            "--progress",
+            "--log-every",
+            "1",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["documents"] == 1
+    assert "export-source" in captured.err
+    assert "canonical/entities/documents/source=FakeMinerU" in captured.err

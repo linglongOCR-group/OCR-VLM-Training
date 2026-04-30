@@ -10,6 +10,7 @@ import pandas as pd
 
 from tools.data_management.canonical.writer import CanonicalWriteReport, CanonicalWriter
 from tools.data_management.config.resolver import resolve_path
+from tools.data_management.progress import ProgressReporter
 from tools.data_management.schemas import (
     AssetRecord,
     CanonicalDocument,
@@ -139,9 +140,18 @@ class MinerUSourceAdapter(SourceAdapter):
         *,
         tasks: list[str] | None = None,
         overwrite_partitions: bool = True,
+        progress: ProgressReporter | None = None,
     ) -> CanonicalWriteReport:
         selected_tasks = set(tasks or DEFAULT_TASKS)
         canonical_root = Path(canonical_root)
+        if progress:
+            progress.log(
+                "export-source",
+                phase="start",
+                source=self.options.dataset_name,
+                canonical_root=canonical_root,
+                tasks=sorted(selected_tasks),
+            )
         manifest_writer = CanonicalWriter(canonical_root, overwrite_partitions=overwrite_partitions)
         report = MinerUExportReport(dataset_name=self.options.dataset_name)
         document_writer = _ShardWriter(
@@ -177,11 +187,21 @@ class MinerUSourceAdapter(SourceAdapter):
             if self.options.max_samples is not None and report.scanned_samples >= self.options.max_samples:
                 break
             report.scanned_samples += 1
+            if progress:
+                progress.update(
+                    "export-source",
+                    report.scanned_samples,
+                    total=self.options.max_samples,
+                    scanned=report.scanned_samples,
+                    sample=sample.sample_id,
+                )
             try:
                 exported = self._export_sample(sample, selected_tasks)
             except Exception as exc:
                 report.errors.append({"sample_id": sample.sample_id, "error": str(exc)})
                 report.skipped_samples += 1
+                if progress:
+                    progress.log("export-source", phase="skip", sample=sample.sample_id, error=exc)
                 if not self.options.skip_errors:
                     raise
                 continue
@@ -194,6 +214,8 @@ class MinerUSourceAdapter(SourceAdapter):
 
         for writer in [document_writer, page_writer, region_writer, asset_writer, *task_writers.values()]:
             writer.close()
+            if progress and writer.count:
+                progress.log("export-source", phase="wrote", path=writer.output_dir, rows=writer.count)
 
         report.documents = document_writer.count
         report.pages = page_writer.count
@@ -209,6 +231,16 @@ class MinerUSourceAdapter(SourceAdapter):
                 "report": asdict(report),
             },
         )
+        if progress:
+            progress.finish(
+                "export-source",
+                total=report.scanned_samples,
+                source=self.options.dataset_name,
+                documents=report.documents,
+                records=sum(report.task_records.values()),
+                assets=report.assets,
+                skipped=report.skipped_samples,
+            )
         return CanonicalWriteReport(
             source_name=self.options.dataset_name,
             documents=report.documents,
