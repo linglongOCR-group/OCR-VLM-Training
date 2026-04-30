@@ -11,6 +11,11 @@ data:
   max_length: ${oc.env:MAX_LENGTH,4096}
   pad_mode: no_padding
   messages_key: messages
+  image_key: runtime_images
+  image_assets_dir: ${oc.env:VIEW_IMAGE_ASSETS_DIR,}
+  custom_cls:
+    path: ${oc.env:PROJECT_ROOT}/tools/data_management/runtime/verl_multimodal_dataset.py
+    name: OcrMultiTurnSFTDataset
 trainer:
   project_name: ${oc.env:WANDB_PROJECT,ocr-vlm-training}
   experiment_name: ${oc.env:EXPERIMENT_NAME,sft-qwen2-5-vl-fsdp}

@@ -2,7 +2,11 @@
 train_files: ${oc.env:TRAIN_FILE}
 val_files: ${oc.env:VAL_FILE,null}
 prompt_key: prompt
-image_key: images
+image_key: runtime_images
+image_assets_dir: ${oc.env:VIEW_IMAGE_ASSETS_DIR,}
+custom_cls:
+  path: ${oc.env:PROJECT_ROOT}/tools/data_management/runtime/verl_multimodal_dataset.py
+  name: OcrRLHFDataset
 reward_fn_key: data_source
 max_prompt_length: 1024
 max_response_length: 2048

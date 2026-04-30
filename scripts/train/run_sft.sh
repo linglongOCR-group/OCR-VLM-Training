@@ -16,6 +16,7 @@ NPUS_PER_NODE=${NPUS_PER_NODE:-8}
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 MASTER_PORT=${MASTER_PORT:-29500}
+VIEW_IMAGE_ASSETS_DIR=${VIEW_IMAGE_ASSETS_DIR:-}
 
 torchrun \
   --nnodes="${NNODES}" \
@@ -27,7 +28,10 @@ torchrun \
   data.train_files="${TRAIN_FILE}" \
   data.val_files="${VAL_FILE}" \
   data.messages_key=messages \
-  data.image_key=images \
+  data.image_key=runtime_images \
+  +data.image_assets_dir="${VIEW_IMAGE_ASSETS_DIR}" \
+  data.custom_cls.path="${PROJECT_ROOT}/tools/data_management/runtime/verl_multimodal_dataset.py" \
+  data.custom_cls.name=OcrMultiTurnSFTDataset \
   data.train_batch_size="${TRAIN_BATCH_SIZE:-64}" \
   data.micro_batch_size_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-1}" \
   data.max_length="${MAX_LENGTH:-4096}" \
