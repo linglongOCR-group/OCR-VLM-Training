@@ -212,6 +212,7 @@ class ViewBuilder:
         progress: ProgressReporter | None = None,
         num_workers: int | None = None,
         worker_batch_size: int | None = None,
+        schema_sample_size: int | None = None,
     ) -> ViewBuildReport:
         if isinstance(view_config, str | Path):
             config = read_yaml(view_config)
@@ -230,7 +231,12 @@ class ViewBuilder:
         split_map = self._assign_splits(records, config.get("split_policy") or {})
         materialize_ctx = self._build_materialize_context(config)
         rows_per_shard = _resolve_rows_per_shard(config)
-        execution = self._resolve_execution(config, num_workers=num_workers, worker_batch_size=worker_batch_size)
+        execution = self._resolve_execution(
+            config,
+            num_workers=num_workers,
+            worker_batch_size=worker_batch_size,
+            schema_sample_size=schema_sample_size,
+        )
         if progress:
             progress.log(
                 "build-view",
@@ -240,6 +246,7 @@ class ViewBuilder:
                 rows_per_shard=rows_per_shard,
                 num_workers=execution["num_workers"],
                 worker_batch_size=execution["worker_batch_size"],
+                schema_sample_size=execution["schema_sample_size"],
             )
         view_assets_dir = self.view_root / "assets"
         if overwrite:
@@ -260,6 +267,7 @@ class ViewBuilder:
             stage=stage,
             split_map=split_map,
             progress=progress,
+            schema_sample_size=execution["schema_sample_size"],
         )
         writer = _SplitParquetWriter(output_dir, schema, rows_per_shard=rows_per_shard)
         materialize_ctx["asset_dir_resolver"] = writer.asset_dirs
@@ -305,6 +313,7 @@ class ViewBuilder:
         *,
         num_workers: int | None,
         worker_batch_size: int | None,
+        schema_sample_size: int | None,
     ) -> dict[str, int]:
         view_build_config = {}
         if self.processing_config is not None:
@@ -314,13 +323,25 @@ class ViewBuilder:
         resolved_batch_size = (
             worker_batch_size if worker_batch_size is not None else view_build_config.get("worker_batch_size", 256)
         )
+        resolved_schema_sample_size = (
+            schema_sample_size
+            if schema_sample_size is not None
+            else view_build_config.get("schema_sample_size", 4096)
+        )
         resolved_workers = int(resolved_workers)
         resolved_batch_size = int(resolved_batch_size)
+        resolved_schema_sample_size = int(resolved_schema_sample_size)
         if resolved_workers < 1:
             raise ValueError("num_workers must be at least 1")
         if resolved_batch_size < 1:
             raise ValueError("worker_batch_size must be at least 1")
-        return {"num_workers": resolved_workers, "worker_batch_size": resolved_batch_size}
+        if resolved_schema_sample_size < 1:
+            raise ValueError("schema_sample_size must be at least 1")
+        return {
+            "num_workers": resolved_workers,
+            "worker_batch_size": resolved_batch_size,
+            "schema_sample_size": resolved_schema_sample_size,
+        }
 
     def _write_materialized_rows(
         self,
@@ -377,12 +398,14 @@ class ViewBuilder:
         stage: str,
         split_map: dict[str, str],
         progress: ProgressReporter | None = None,
+        schema_sample_size: int = 4096,
     ) -> pa.Schema:
         """Infer a stable parquet schema without loading image bytes."""
         schema_ctx = {**materialize_ctx, "schema_inference": True}
         schemas: list[pa.Schema] = []
         batch: list[dict[str, Any]] = []
-        for index, record in enumerate(records, start=1):
+        sample_records = _schema_sample_records(records, schema_sample_size)
+        for index, record in enumerate(sample_records, start=1):
             row = self._materialize(
                 record,
                 config,
@@ -396,7 +419,7 @@ class ViewBuilder:
                 schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
                 batch = []
             if progress:
-                progress.update("build-view", index, total=len(records), phase="infer-schema")
+                progress.update("build-view", index, total=len(sample_records), phase="infer-schema")
         if batch:
             schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
         if not schemas:
@@ -775,6 +798,19 @@ def _iter_materialize_batches(
             batch = []
     if batch:
         yield batch
+
+
+def _schema_sample_records(records: list[dict[str, Any]], sample_size: int) -> list[dict[str, Any]]:
+    counts: dict[tuple[str, str], int] = {}
+    sampled: list[dict[str, Any]] = []
+    for record in records:
+        key = (str(record.get("task", "")), str(record.get("source_name", "")))
+        count = counts.get(key, 0)
+        if count >= sample_size:
+            continue
+        sampled.append(record)
+        counts[key] = count + 1
+    return sampled
 
 
 def _init_view_worker(

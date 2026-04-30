@@ -508,6 +508,90 @@ def test_view_build_worker_controls_can_come_from_config(tmp_path):
     validate_view(view_root)
 
 
+def test_view_build_schema_inference_uses_bounded_sample(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "schema_sample"
+    stream = StringIO()
+    progress = ProgressReporter(enabled=True, log_every=1, stream=stream, root=tmp_path)
+
+    ViewBuilder(canonical_root, view_root).build(
+        {
+            "name": "schema_sample",
+            "stage": "rlvr",
+            "model_family": "mineru2.5",
+            "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+            "include": [
+                {"task": "layout", "sources": ["FakeMinerU"]},
+                {"task": "table", "sources": ["FakeMinerU"]},
+                {"task": "formula", "sources": ["FakeMinerU"]},
+                {"task": "text", "sources": ["FakeMinerU"]},
+            ],
+            "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+            "reward_profile": {"default": "normalized_levenshtein_v1"},
+        },
+        schema_sample_size=1,
+        progress=progress,
+    )
+
+    logs = stream.getvalue()
+    assert "phase=infer-schema" in logs
+    assert "current=4" in logs
+    validate_view(view_root)
+
+
+def test_cli_build_view_accepts_schema_sample_size(tmp_path, capsys):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "schema_sample_cli"
+    config_path = tmp_path / "schema_sample_view.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "schema_sample_cli",
+                "stage": "rlvr",
+                "model_family": "mineru2.5",
+                "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+                "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+                "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+                "reward_profile": {"default": "normalized_levenshtein_v1"},
+            }
+        )
+    )
+
+    docds_main(["build-view", str(config_path), "--schema-sample-size", "1"])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["total_records"] == 1
+    validate_view(view_root)
+
+
+def test_view_build_schema_sample_size_can_come_from_config(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "schema_sample_config"
+    stream = StringIO()
+    progress = ProgressReporter(enabled=True, log_every=1, stream=stream, root=tmp_path)
+
+    ViewBuilder(canonical_root, view_root).build(
+        {
+            "name": "schema_sample_config",
+            "stage": "rlvr",
+            "model_family": "mineru2.5",
+            "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+            "include": [
+                {"task": "layout", "sources": ["FakeMinerU"]},
+                {"task": "table", "sources": ["FakeMinerU"]},
+            ],
+            "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+            "reward_profile": {"default": "normalized_levenshtein_v1"},
+            "execution": {"view_build": {"schema_sample_size": 1}},
+        },
+        progress=progress,
+    )
+
+    logs = stream.getvalue()
+    assert "schema_sample_size=1" in logs
+    validate_view(view_root)
+
+
 def test_legacy_image_materialization_modes_are_rejected(tmp_path):
     canonical_root = _export_fake_canonical(tmp_path)
     for mode in ("embedded_bytes", "cached", "path", "runtime"):
