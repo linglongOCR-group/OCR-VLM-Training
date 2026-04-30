@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import shutil
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,13 @@ from tools.data_management.registry.reward_registry import default_reward_regist
 from tools.data_management.registry.serializer_registry import default_serializer_registry
 from tools.data_management.schemas import ViewRecord, stable_hash, stable_id, to_plain
 from tools.data_management.utils.io import read_yaml, write_json
+
+
+_WORKER_BUILDER: "ViewBuilder | None" = None
+_WORKER_CONFIG: dict[str, Any] | None = None
+_WORKER_CONTEXT: dict[str, Any] | None = None
+_WORKER_VIEW_NAME: str | None = None
+_WORKER_STAGE: str | None = None
 
 
 @dataclass(slots=True)
@@ -173,6 +181,7 @@ class ViewBuilder:
     def __init__(self, canonical_root: str | Path, view_root: str | Path, *, processing_config: Any | None = None) -> None:
         self.canonical_root = Path(canonical_root)
         self.view_root = Path(view_root)
+        self.processing_config = processing_config
         self.canonical_reader = CanonicalReader(self.canonical_root)
         self.serializers = (
             configured_serializer_registry(processing_config) if processing_config else default_serializer_registry()
@@ -201,6 +210,8 @@ class ViewBuilder:
         *,
         overwrite: bool = True,
         progress: ProgressReporter | None = None,
+        num_workers: int | None = None,
+        worker_batch_size: int | None = None,
     ) -> ViewBuildReport:
         if isinstance(view_config, str | Path):
             config = read_yaml(view_config)
@@ -219,6 +230,7 @@ class ViewBuilder:
         split_map = self._assign_splits(records, config.get("split_policy") or {})
         materialize_ctx = self._build_materialize_context(config)
         rows_per_shard = _resolve_rows_per_shard(config)
+        execution = self._resolve_execution(config, num_workers=num_workers, worker_batch_size=worker_batch_size)
         if progress:
             progress.log(
                 "build-view",
@@ -226,6 +238,8 @@ class ViewBuilder:
                 total=len(records),
                 image_mode=materialize_ctx["image_materialization"]["mode"],
                 rows_per_shard=rows_per_shard,
+                num_workers=execution["num_workers"],
+                worker_batch_size=execution["worker_batch_size"],
             )
         view_assets_dir = self.view_root / "assets"
         if overwrite:
@@ -250,18 +264,18 @@ class ViewBuilder:
         writer = _SplitParquetWriter(output_dir, schema, rows_per_shard=rows_per_shard)
         materialize_ctx["asset_dir_resolver"] = writer.asset_dirs
         try:
-            for index, record in enumerate(records, start=1):
-                row = self._materialize(
-                    record,
-                    config,
-                    materialize_ctx,
-                    view_name=view_name,
-                    stage=stage,
-                    split=split_map[record["record_id"]],
-                )
-                writer.write(row)
-                if progress:
-                    progress.update("build-view", index, total=len(records), phase="materialize")
+            self._write_materialized_rows(
+                records,
+                config,
+                materialize_ctx,
+                writer,
+                view_name=view_name,
+                stage=stage,
+                split_map=split_map,
+                progress=progress,
+                num_workers=execution["num_workers"],
+                worker_batch_size=execution["worker_batch_size"],
+            )
             split_counts = writer.finish()
         except Exception:
             writer.abort()
@@ -284,6 +298,74 @@ class ViewBuilder:
                 split_counts=split_counts,
             )
         return ViewBuildReport(view_name=view_name, stage=stage, total_records=sum(split_counts.values()), split_counts=split_counts)
+
+    def _resolve_execution(
+        self,
+        config: dict[str, Any],
+        *,
+        num_workers: int | None,
+        worker_batch_size: int | None,
+    ) -> dict[str, int]:
+        view_build_config = {}
+        if self.processing_config is not None:
+            view_build_config.update(((self.processing_config.execution or {}).get("view_build") or {}))
+        view_build_config.update(((config.get("execution") or {}).get("view_build") or {}))
+        resolved_workers = num_workers if num_workers is not None else view_build_config.get("num_workers", 1)
+        resolved_batch_size = (
+            worker_batch_size if worker_batch_size is not None else view_build_config.get("worker_batch_size", 256)
+        )
+        resolved_workers = int(resolved_workers)
+        resolved_batch_size = int(resolved_batch_size)
+        if resolved_workers < 1:
+            raise ValueError("num_workers must be at least 1")
+        if resolved_batch_size < 1:
+            raise ValueError("worker_batch_size must be at least 1")
+        return {"num_workers": resolved_workers, "worker_batch_size": resolved_batch_size}
+
+    def _write_materialized_rows(
+        self,
+        records: list[dict[str, Any]],
+        config: dict[str, Any],
+        materialize_ctx: dict[str, Any],
+        writer: _SplitParquetWriter,
+        *,
+        view_name: str,
+        stage: str,
+        split_map: dict[str, str],
+        progress: ProgressReporter | None,
+        num_workers: int,
+        worker_batch_size: int,
+    ) -> None:
+        if num_workers == 1:
+            for index, record in enumerate(records, start=1):
+                row = self._materialize(
+                    record,
+                    config,
+                    materialize_ctx,
+                    view_name=view_name,
+                    stage=stage,
+                    split=split_map[record["record_id"]],
+                )
+                writer.write(row)
+                if progress:
+                    progress.update("build-view", index, total=len(records), phase="materialize")
+            return
+
+        worker_ctx = dict(materialize_ctx)
+        worker_ctx.pop("asset_dir_resolver", None)
+        processed = 0
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_init_view_worker,
+            initargs=(self.processing_config, config, worker_ctx, view_name, stage),
+        ) as executor:
+            batches = _iter_materialize_batches(records, split_map, worker_batch_size)
+            for rows in executor.map(_materialize_record_batch, batches):
+                for row in rows:
+                    writer.write(row)
+                processed += len(rows)
+                if progress:
+                    progress.update("build-view", processed, total=len(records), phase="materialize")
 
     def _infer_view_schema(
         self,
@@ -678,6 +760,58 @@ def _resolve_rows_per_shard(config: dict[str, Any]) -> int | None:
     if rows_per_shard <= 0:
         raise ValueError("rows_per_shard must be positive")
     return rows_per_shard
+
+
+def _iter_materialize_batches(
+    records: list[dict[str, Any]],
+    split_map: dict[str, str],
+    batch_size: int,
+):
+    batch = []
+    for record in records:
+        batch.append((record, split_map[record["record_id"]]))
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _init_view_worker(
+    processing_config: Any | None,
+    config: dict[str, Any],
+    materialize_ctx: dict[str, Any],
+    view_name: str,
+    stage: str,
+) -> None:
+    global _WORKER_BUILDER, _WORKER_CONFIG, _WORKER_CONTEXT, _WORKER_VIEW_NAME, _WORKER_STAGE
+    _WORKER_BUILDER = ViewBuilder(".", ".", processing_config=processing_config)
+    _WORKER_CONFIG = config
+    _WORKER_CONTEXT = materialize_ctx
+    _WORKER_VIEW_NAME = view_name
+    _WORKER_STAGE = stage
+
+
+def _materialize_record_batch(batch: list[tuple[dict[str, Any], str]]) -> list[dict[str, Any]]:
+    if (
+        _WORKER_BUILDER is None
+        or _WORKER_CONFIG is None
+        or _WORKER_CONTEXT is None
+        or _WORKER_VIEW_NAME is None
+        or _WORKER_STAGE is None
+    ):
+        raise RuntimeError("view materialization worker is not initialized")
+    return [
+        _WORKER_BUILDER._materialize(
+            record,
+            _WORKER_CONFIG,
+            _WORKER_CONTEXT,
+            view_name=_WORKER_VIEW_NAME,
+            stage=_WORKER_STAGE,
+            split=split,
+        )
+        for record, split in batch
+    ]
 
 
 def _filter_rows(rows: list[dict[str, Any]], where: dict[str, Any]) -> list[dict[str, Any]]:

@@ -40,6 +40,8 @@ def main(argv: list[str] | None = None) -> None:
     build_view.add_argument("view_config")
     build_view.add_argument("--config")
     build_view.add_argument("--overwrite", action="store_true", default=True)
+    build_view.add_argument("--num-workers", type=int)
+    build_view.add_argument("--worker-batch-size", type=int)
     _add_progress_args(build_view)
 
     validate_view_cmd = subparsers.add_parser("validate-view")
@@ -107,7 +109,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "build-view":
         builder = ViewBuilder.from_config_path(args.view_config, processing_config=args.config)
         progress = _make_progress(args, root=_common_parent(builder.canonical_root, builder.view_root))
-        report = builder.build(args.view_config, overwrite=args.overwrite, progress=progress)
+        report = builder.build(
+            args.view_config,
+            overwrite=args.overwrite,
+            progress=progress,
+            num_workers=args.num_workers,
+            worker_batch_size=args.worker_batch_size,
+        )
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         return
 

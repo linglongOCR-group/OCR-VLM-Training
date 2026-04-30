@@ -396,6 +396,118 @@ def test_view_image_assets_with_source_reference_policy(tmp_path):
     assert len(list(assets_dir.glob("*.png"))) > 0
 
 
+def test_parallel_view_build_matches_single_process_output(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    base_config = {
+        "name": "mineru25_parallel",
+        "stage": "rlvr",
+        "model_family": "mineru2.5",
+        "include": [
+            {"task": "layout", "sources": ["FakeMinerU"]},
+            {"task": "table", "sources": ["FakeMinerU"]},
+            {"task": "formula", "sources": ["FakeMinerU"]},
+            {"task": "text", "sources": ["FakeMinerU"]},
+        ],
+        "reward_profile": {"default": "normalized_levenshtein_v1"},
+        "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+    single_root = tmp_path / "views" / "single"
+    parallel_root = tmp_path / "views" / "parallel"
+
+    ViewBuilder(canonical_root, single_root).build({**base_config, "paths": {"canonical_root": str(canonical_root), "view_root": str(single_root)}})
+    ViewBuilder(canonical_root, parallel_root).build(
+        {**base_config, "paths": {"canonical_root": str(canonical_root), "view_root": str(parallel_root)}},
+        num_workers=2,
+        worker_batch_size=1,
+    )
+
+    single = pd.read_parquet(single_root / "train.parquet").sort_values("id").reset_index(drop=True)
+    parallel = pd.read_parquet(parallel_root / "train.parquet").sort_values("id").reset_index(drop=True)
+    assert parallel["id"].tolist() == single["id"].tolist()
+    assert parallel["label"].tolist() == single["label"].tolist()
+    assert parallel["canonical_record_id"].tolist() == single["canonical_record_id"].tolist()
+    assert [_first_image_bytes(value) for value in parallel["images_bytes"]] == [
+        _first_image_bytes(value) for value in single["images_bytes"]
+    ]
+    validate_view(parallel_root)
+
+
+def test_parallel_source_reference_build_writes_reachable_assets(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "parallel_source_reference"
+    config = {
+        "name": "parallel_source_reference",
+        "stage": "rlvr",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "layout", "sources": ["FakeMinerU"]}],
+        "target_serialization": {"layout": "mineru_layout_box_v1"},
+        "image_policy": {"materialization": {"mode": "source_reference"}},
+        "image_transform": {"layout": {"pad_to_square": True, "resize_to": 128}},
+        "reward_profile": {"default": "normalized_levenshtein_v1"},
+        "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config, num_workers=2, worker_batch_size=1)
+
+    train = pd.read_parquet(view_root / "train.parquet")
+    image_name = _as_list(train.iloc[0]["images_path"])[0]
+    assert Path(image_name).name == image_name
+    assert (view_root / "assets" / image_name).is_file()
+    validate_view(view_root, require_images=True)
+
+
+def test_cli_build_view_accepts_worker_controls(tmp_path, capsys):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "parallel_cli"
+    config_path = tmp_path / "parallel_view.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "parallel_cli",
+                "stage": "rlvr",
+                "model_family": "mineru2.5",
+                "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+                "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+                "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+                "reward_profile": {"default": "normalized_levenshtein_v1"},
+            }
+        )
+    )
+
+    docds_main(["build-view", str(config_path), "--num-workers", "2", "--worker-batch-size", "1"])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["total_records"] == 1
+    validate_view(view_root)
+
+
+def test_view_build_worker_controls_can_come_from_config(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "parallel_config"
+    stream = StringIO()
+    progress = ProgressReporter(enabled=True, log_every=1, stream=stream, root=tmp_path)
+
+    ViewBuilder(canonical_root, view_root).build(
+        {
+            "name": "parallel_config",
+            "stage": "rlvr",
+            "model_family": "mineru2.5",
+            "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+            "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+            "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+            "reward_profile": {"default": "normalized_levenshtein_v1"},
+            "execution": {"view_build": {"num_workers": 2, "worker_batch_size": 1}},
+        },
+        progress=progress,
+    )
+
+    logs = stream.getvalue()
+    assert "num_workers=2" in logs
+    assert "worker_batch_size=1" in logs
+    validate_view(view_root)
+
+
 def test_legacy_image_materialization_modes_are_rejected(tmp_path):
     canonical_root = _export_fake_canonical(tmp_path)
     for mode in ("embedded_bytes", "cached", "path", "runtime"):
