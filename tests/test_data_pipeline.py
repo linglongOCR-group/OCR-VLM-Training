@@ -26,6 +26,38 @@ def _decode_png(image_bytes: bytes) -> Image.Image:
     return Image.open(BytesIO(image_bytes))
 
 
+def _as_bytes(value) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray | memoryview):
+        return bytes(value)
+    if hasattr(value, "as_py"):
+        return value.as_py()
+    return bytes(value)
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, float) and pd.isna(value):
+        return []
+    if hasattr(value, "as_py"):
+        value = value.as_py()
+        if value is None:
+            return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _first_image_bytes(value) -> bytes:
+    return _as_bytes(_as_list(value)[0])
+
+
 def _write_fake_mineru_dataset(root: Path, source_root: Path, sample: str = "paper_001") -> None:
     vlm_dir = root / sample / "vlm"
     images_dir = vlm_dir / "images"
@@ -234,20 +266,17 @@ def test_build_sft_and_rlvr_views(tmp_path):
     assert set(train["reward_profile_id"]) == {"normalized_levenshtein_v1"}
     assert all(row["label"] == row["answer_key"] == row["reward_payload"]["label"] for _, row in train.iterrows())
     validate_grpo_view([view_root])
-    # VERL compatibility columns
-    for column in ("images", "data_source", "extra_info"):
+    # Portable multimodal columns
+    for column in ("images_bytes", "images_path", "data_source", "extra_info"):
         assert column in train.columns, f"missing column {column}"
-    assert "image_bytes" not in train.columns
+    assert "images" not in train.columns
     for _, row in train.iterrows():
         assert row["data_source"] == row["task"]
         assert row["extra_info"]["sample_id"] == row["id"]
         assert row["extra_info"]["task_type"] == row["task"]
-        assert hasattr(row["images"], "__len__")
-        assert len(row["images"]) == 1
-        assert isinstance(row["images"][0], dict)
-        assert "bytes" in row["images"][0]
-        assert "image" not in row["images"][0]
-        assert _decode_png(row["images"][0]["bytes"]).size[0] > 0
+        assert len(_as_list(row["images_bytes"])) == 1
+        assert not _as_list(row["images_path"])
+        assert _decode_png(_first_image_bytes(row["images_bytes"])).size[0] > 0
         assert row["image_path"]
     smoke = reward_smoke_test(view_root)
     assert smoke["min_score"] == 1.0
@@ -271,9 +300,10 @@ def test_build_sft_view_embeds_images_and_messages(tmp_path):
     train = pd.read_parquet(view_root / "train.parquet")
     row = train.iloc[0]
 
-    assert "image_bytes" not in train.columns
-    assert _decode_png(row["images"][0]["bytes"]).size[0] > 0
-    assert "image" not in row["images"][0]
+    assert "images" not in train.columns
+    assert len(_as_list(row["images_bytes"])) == 1
+    assert not _as_list(row["images_path"])
+    assert _decode_png(_first_image_bytes(row["images_bytes"])).size[0] > 0
     assert len(row["messages"]) == 2
     assert row["messages"][0]["role"] == "user"
     assert "<image>" in row["messages"][0]["content"]
@@ -313,30 +343,31 @@ def test_view_image_bytes_with_transform(tmp_path):
 
     for _, row in layout_rows.iterrows():
         assert row["view_image_asset_id"] is not None
-        assert "image_bytes" not in train.columns
-        assert _decode_png(row["images"][0]["bytes"]).size == (128, 128)
+        assert "images" not in train.columns
+        assert len(_as_list(row["images_bytes"])) == 1
+        assert _decode_png(_first_image_bytes(row["images_bytes"])).size == (128, 128)
         assert "<|box_start|>300 100 700 200<|box_end|>" in row["label"]
         assert row["image_path"]
 
     for _, row in text_rows.iterrows():
         assert row["view_image_asset_id"] is not None
-        assert isinstance(row["images"][0], dict)
-        assert "bytes" in row["images"][0]
-        assert "image_bytes" not in train.columns
+        assert len(_as_list(row["images_bytes"])) == 1
+        assert _decode_png(_first_image_bytes(row["images_bytes"])).size[0] > 0
+        assert "images" not in train.columns
         assert row["image_path"]
 
 
-def test_view_image_assets_with_cached_policy(tmp_path):
+def test_view_image_assets_with_source_reference_policy(tmp_path):
     canonical_root = _export_fake_canonical(tmp_path)
-    view_root = tmp_path / "views" / "test_cached_view"
+    view_root = tmp_path / "views" / "test_source_reference_view"
     config = {
-        "name": "test_cached_view",
+        "name": "test_source_reference_view",
         "stage": "rlvr",
         "model_family": "mineru2.5",
         "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
         "include": [{"task": "layout", "sources": ["FakeMinerU"]}],
         "target_serialization": {"layout": "mineru_layout_box_v1"},
-        "image_policy": {"materialization": {"mode": "cached"}},
+        "image_policy": {"materialization": {"mode": "source_reference"}},
         "image_transform": {"layout": {"pad_to_square": True, "resize_to": 128}},
         "reward_profile": {"default": "normalized_levenshtein_v1"},
         "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
@@ -348,16 +379,133 @@ def test_view_image_assets_with_cached_policy(tmp_path):
     train = pd.read_parquet(view_root / "train.parquet")
     row = train.iloc[0]
 
-    assert row["images"][0]["image"].startswith(str(view_root / "assets" / "layout"))
-    assert "bytes" not in row["images"][0]
-    assert "image_bytes" not in train.columns
-    assert Path(row["image_path"]).exists()
-    assert Path(row["image_path"]).stem == row["view_image_asset_id"]
+    images_path = _as_list(row["images_path"])
+    assert len(images_path) == 1
+    assert not _as_list(row["images_bytes"])
+    assert "images" not in train.columns
+    assert Path(images_path[0]).name == images_path[0]
+    assert not Path(images_path[0]).is_absolute()
+    assert "/" not in images_path[0]
+    assert (view_root / "assets" / images_path[0]).is_file()
+    assert row["image_path"] == images_path[0]
 
     # View asset files exist on disk
-    assets_dir = view_root / "assets" / "layout"
+    assets_dir = view_root / "assets"
     assert assets_dir.is_dir()
     assert len(list(assets_dir.glob("*.png"))) > 0
+
+
+def test_legacy_image_materialization_modes_are_rejected(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    for mode in ("embedded_bytes", "cached", "path", "runtime"):
+        config = {
+            "name": f"test_legacy_{mode}",
+            "stage": "rlvr",
+            "model_family": "mineru2.5",
+            "paths": {"canonical_root": str(canonical_root), "view_root": str(tmp_path / "views" / mode)},
+            "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+            "target_serialization": {"text": "plain_text_v1"},
+            "image_policy": {"materialization": {"mode": mode}},
+            "reward_profile": {"default": "normalized_levenshtein_v1"},
+            "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+        }
+        try:
+            ViewBuilder(canonical_root, tmp_path / "views" / mode).build(config)
+        except ValueError as exc:
+            assert "unsupported image materialization mode" in str(exc)
+        else:
+            raise AssertionError(f"legacy mode {mode} was accepted")
+
+def test_view_builder_samples_documents_by_source_across_tasks(tmp_path):
+    builder = ViewBuilder(tmp_path / "canonical", tmp_path / "views")
+    records = []
+    for doc_idx in range(5):
+        for task in ("text", "table"):
+            records.append(
+                {
+                    "record_id": f"docbank-{doc_idx}-{task}",
+                    "source_name": "DocBank_500K",
+                    "task": task,
+                    "document_id": f"docbank-{doc_idx}",
+                    "page_id": f"docbank-{doc_idx}-p0",
+                }
+            )
+    records.append(
+        {
+            "record_id": "hybrid-0-text",
+            "source_name": "MinerU_Hybrid_4_23",
+            "task": "text",
+            "document_id": "hybrid-0",
+            "page_id": "hybrid-0-p0",
+        }
+    )
+
+    sampled = builder._apply_samples(
+        records,
+        [{"sources": ["DocBank_500K"], "level": "document", "count": 2, "seed": 123}],
+    )
+
+    docbank_docs = {row["document_id"] for row in sampled if row["source_name"] == "DocBank_500K"}
+    assert len(docbank_docs) == 2
+    assert sum(row["source_name"] == "DocBank_500K" for row in sampled) == 4
+    assert any(row["source_name"] == "MinerU_Hybrid_4_23" for row in sampled)
+
+
+def test_view_builder_shards_split_outputs(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "mineru25_sft_sharded"
+    config = {
+        "name": "mineru25_sft_sharded",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [
+            {"task": "layout", "sources": ["FakeMinerU"]},
+            {"task": "table", "sources": ["FakeMinerU"]},
+            {"task": "formula", "sources": ["FakeMinerU"]},
+            {"task": "text", "sources": ["FakeMinerU"]},
+        ],
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+        "shard_policy": {"rows_per_shard": 2},
+        "reward_profile": {"default": "normalized_levenshtein_v1"},
+    }
+
+    report = ViewBuilder(canonical_root, view_root).build(config)
+
+    assert report.split_counts == {"train": 4, "val": 0, "test": 0}
+    assert not (view_root / "train.parquet").exists()
+    shard_paths = sorted((view_root / "train").glob("part-*.parquet"))
+    assert [path.name for path in shard_paths] == ["part-00000.parquet", "part-00001.parquet"]
+    assert [len(pd.read_parquet(path)) for path in shard_paths] == [2, 2]
+    assert [len(pd.read_parquet(path, dtype_backend="pyarrow")) for path in shard_paths] == [2, 2]
+    validate_view(view_root, require_images=True)
+
+
+def test_sharded_source_reference_view_uses_root_assets_and_filename_refs(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "mineru25_sft_source_reference_sharded"
+    config = {
+        "name": "mineru25_sft_source_reference_sharded",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+        "target_serialization": {"text": "plain_text_v1"},
+        "image_policy": {"materialization": {"mode": "source_reference"}},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+        "shard_policy": {"rows_per_shard": 1},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+
+    shard_path = view_root / "train" / "part-00000.parquet"
+    train = pd.read_parquet(shard_path)
+    image_name = _as_list(train.iloc[0]["images_path"])[0]
+    assert Path(image_name).name == image_name
+    assert (view_root / "assets" / image_name).is_file()
+    assert train.iloc[0]["image_path"] == image_name
+    assert not (view_root / "train" / "assets").exists()
+    validate_view(view_root, require_images=True)
 
 
 def test_cli_validate_view_resolves_name_from_dataset_root(monkeypatch, tmp_path):
@@ -377,6 +525,24 @@ def test_cli_validate_view_resolves_name_from_dataset_root(monkeypatch, tmp_path
     )
 
     docds_main(["validate-view", "mineru25_rlvr"])
+
+
+def test_cli_validate_view_absolute_path_does_not_require_dataset_root(monkeypatch, tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "absolute_path_view"
+    monkeypatch.delenv("OCR_DATASET_ROOT", raising=False)
+    ViewBuilder(canonical_root, view_root).build(
+        {
+            "name": "absolute_path_view",
+            "stage": "rlvr",
+            "model_family": "mineru2.5",
+            "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+            "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+            "reward_profile": {"default": "normalized_levenshtein_v1"},
+        }
+    )
+
+    docds_main(["validate-view", str(view_root), "--require-images"])
 
 
 def test_score_predictions_cli_path(tmp_path):

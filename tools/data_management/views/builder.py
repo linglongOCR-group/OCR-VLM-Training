@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from PIL import Image
 
 from tools.data_management.canonical.reader import CanonicalReader
@@ -16,7 +19,7 @@ from tools.data_management.registry.configured import configured_reward_registry
 from tools.data_management.registry.reward_registry import default_reward_registry
 from tools.data_management.registry.serializer_registry import default_serializer_registry
 from tools.data_management.schemas import ViewRecord, stable_hash, stable_id, to_plain
-from tools.data_management.utils.io import read_yaml, write_json, write_parquet
+from tools.data_management.utils.io import read_yaml, write_json
 
 
 @dataclass(slots=True)
@@ -33,6 +36,136 @@ class ViewBuildReport:
             "total_records": self.total_records,
             "split_counts": self.split_counts,
         }
+
+
+class _SplitParquetWriter:
+    def __init__(
+        self,
+        output_dir: Path,
+        schema: pa.Schema,
+        *,
+        batch_size: int = 512,
+        rows_per_shard: int | None = None,
+    ) -> None:
+        self.output_dir = output_dir
+        self.schema = schema
+        self.rows_per_shard = rows_per_shard
+        self.batch_size = min(batch_size, rows_per_shard) if rows_per_shard else batch_size
+        self.buffers: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
+        self.counts: dict[str, int] = {"train": 0, "val": 0, "test": 0}
+        self.writers: dict[str, pq.ParquetWriter] = {}
+        self.temp_paths: dict[str, Path] = {}
+        self.shard_indices: dict[str, int] = {"train": 0, "val": 0, "test": 0}
+        self.rows_in_current_shard: dict[str, int] = {"train": 0, "val": 0, "test": 0}
+        self.shard_counts: dict[str, int] = {"train": 0, "val": 0, "test": 0}
+        self.temp_dirs: dict[str, Path] = {}
+        if rows_per_shard:
+            for split in self.buffers:
+                temp_dir = output_dir / f"{split}.tmp"
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir)
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                self.temp_dirs[split] = temp_dir
+        else:
+            self.temp_paths = {
+                split: output_dir / f"{split}.parquet.tmp" for split in self.buffers
+            }
+
+    def write(self, row: dict[str, Any]) -> None:
+        split = row["split"]
+        if split not in self.buffers:
+            raise ValueError(f"unsupported split: {split}")
+        buffer = self.buffers[split]
+        buffer.append(row)
+        if len(buffer) >= self.batch_size:
+            self._flush(split)
+
+    def finish(self) -> dict[str, int]:
+        for split in self.buffers:
+            self._flush(split)
+        for writer in self.writers.values():
+            writer.close()
+        self.writers = {}
+        if self.rows_per_shard:
+            for split, count in self.counts.items():
+                final_path = self.output_dir / f"{split}.parquet"
+                final_dir = self.output_dir / split
+                temp_dir = self.temp_dirs[split]
+                final_path.unlink(missing_ok=True)
+                if final_dir.exists():
+                    shutil.rmtree(final_dir)
+                if count:
+                    temp_dir.replace(final_dir)
+                else:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+        else:
+            for split, count in self.counts.items():
+                final_path = self.output_dir / f"{split}.parquet"
+                final_dir = self.output_dir / split
+                temp_path = self.temp_paths[split]
+                if final_dir.exists():
+                    shutil.rmtree(final_dir)
+                if count:
+                    temp_path.replace(final_path)
+                else:
+                    temp_path.unlink(missing_ok=True)
+                    final_path.unlink(missing_ok=True)
+        return dict(self.counts)
+
+    def abort(self) -> None:
+        for writer in self.writers.values():
+            writer.close()
+        self.writers = {}
+        if self.rows_per_shard:
+            for path in self.temp_dirs.values():
+                shutil.rmtree(path, ignore_errors=True)
+        else:
+            for path in self.temp_paths.values():
+                path.unlink(missing_ok=True)
+
+    def _flush(self, split: str) -> None:
+        buffer = self.buffers[split]
+        while buffer:
+            capacity = self._remaining_capacity(split)
+            chunk = buffer[:capacity]
+            del buffer[:capacity]
+            self._write_chunk(split, chunk)
+
+    def _write_chunk(self, split: str, rows: list[dict[str, Any]]) -> None:
+        table = pa.Table.from_pylist(rows, schema=self.schema)
+        writer = self.writers.get(split)
+        if writer is None:
+            temp_path = self._next_temp_path(split)
+            temp_path.unlink(missing_ok=True)
+            writer = pq.ParquetWriter(temp_path, self.schema)
+            self.writers[split] = writer
+        writer.write_table(table)
+        self.counts[split] += len(rows)
+        self.rows_in_current_shard[split] += len(rows)
+        if self.rows_per_shard and self.rows_in_current_shard[split] >= self.rows_per_shard:
+            writer.close()
+            del self.writers[split]
+            self.rows_in_current_shard[split] = 0
+
+    def _remaining_capacity(self, split: str) -> int:
+        if not self.rows_per_shard:
+            return len(self.buffers[split])
+        remaining = self.rows_per_shard - self.rows_in_current_shard[split]
+        return max(1, remaining)
+
+    def _next_temp_path(self, split: str) -> Path:
+        if not self.rows_per_shard:
+            return self.temp_paths[split]
+        shard_index = self.shard_indices[split]
+        self.shard_indices[split] += 1
+        self.shard_counts[split] += 1
+        return self.temp_dirs[split] / f"part-{shard_index:05d}.parquet"
+
+    def asset_dirs(self, split: str) -> tuple[Path, Path]:
+        if self.rows_per_shard:
+            return self.temp_dirs[split] / "assets", self.output_dir / split / "assets"
+        assets_dir = self.output_dir / "assets"
+        return assets_dir, assets_dir
 
 
 class ViewBuilder:
@@ -73,46 +206,187 @@ class ViewBuilder:
             raise ValueError("view stage must be sft, rlvr, or eval")
         records = self._load_selected_records(config)
         records = self._apply_excludes(records, config.get("exclude") or [])
+        records = self._apply_samples(records, config.get("sample") or [])
         split_map = self._assign_splits(records, config.get("split_policy") or {})
         materialize_ctx = self._build_materialize_context(config)
+        rows_per_shard = _resolve_rows_per_shard(config)
         view_assets_dir = self.view_root / "assets"
         if overwrite:
             try:
                 shutil.rmtree(view_assets_dir)
             except FileNotFoundError:
                 pass
-        view_assets_dir.mkdir(parents=True, exist_ok=True)
+        if not rows_per_shard or _uses_root_view_assets(materialize_ctx["image_materialization"]):
+            view_assets_dir.mkdir(parents=True, exist_ok=True)
         materialize_ctx["view_assets_dir"] = view_assets_dir
-        rows = [
-            self._materialize(record, config, materialize_ctx, view_name=view_name, stage=stage, split=split_map[record["record_id"]])
-            for record in records
-        ]
         output_dir = self.view_root
         output_dir.mkdir(parents=True, exist_ok=True)
-        buckets: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
-        for row in rows:
-            buckets[row["split"]].append(row)
-        split_counts: dict[str, int] = {}
-        for split, split_rows in buckets.items():
-            split_counts[split] = write_parquet(output_dir / f"{split}.parquet", split_rows) if split_rows else 0
-        write_json(output_dir / "stats.json", {"split_counts": split_counts, "total_records": len(rows)})
+        schema = self._infer_view_schema(records, config, materialize_ctx, view_name=view_name, stage=stage, split_map=split_map)
+        writer = _SplitParquetWriter(output_dir, schema, rows_per_shard=rows_per_shard)
+        materialize_ctx["asset_dir_resolver"] = writer.asset_dirs
+        try:
+            for record in records:
+                row = self._materialize(
+                    record,
+                    config,
+                    materialize_ctx,
+                    view_name=view_name,
+                    stage=stage,
+                    split=split_map[record["record_id"]],
+                )
+                writer.write(row)
+            split_counts = writer.finish()
+        except Exception:
+            writer.abort()
+            raise
+        stats = {"split_counts": split_counts, "total_records": sum(split_counts.values())}
+        if writer.rows_per_shard:
+            stats["shard_counts"] = writer.shard_counts
+        write_json(output_dir / "stats.json", stats)
         if "_config_path" in config:
             target_config = output_dir / "view.yaml"
             source_config = Path(config["_config_path"])
             if source_config.resolve() != target_config.resolve():
                 target_config.write_text(source_config.read_text())
-        return ViewBuildReport(view_name=view_name, stage=stage, total_records=len(rows), split_counts=split_counts)
+        return ViewBuildReport(view_name=view_name, stage=stage, total_records=sum(split_counts.values()), split_counts=split_counts)
+
+    def _infer_view_schema(
+        self,
+        records: list[dict[str, Any]],
+        config: dict[str, Any],
+        materialize_ctx: dict[str, Any],
+        *,
+        view_name: str,
+        stage: str,
+        split_map: dict[str, str],
+    ) -> pa.Schema:
+        """Infer a stable parquet schema without loading image bytes."""
+        schema_ctx = {**materialize_ctx, "schema_inference": True}
+        schemas: list[pa.Schema] = []
+        batch: list[dict[str, Any]] = []
+        for record in records:
+            row = self._materialize(
+                record,
+                config,
+                schema_ctx,
+                view_name=view_name,
+                stage=stage,
+                split=split_map[record["record_id"]],
+            )
+            batch.append(row)
+            if len(batch) >= 4096:
+                schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
+                batch = []
+        if batch:
+            schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
+        if not schemas:
+            raise ValueError("view selection produced no records")
+        return pa.unify_schemas(schemas)
 
     def _load_selected_records(self, config: dict[str, Any]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
+        sample_key_sets = self._compute_sample_key_sets(config)
         for include in config.get("include") or []:
             task = include["task"]
             for source in include.get("sources") or []:
-                source_rows = self.canonical_reader.read_task_records(task, source)
+                source_rows = self._read_task_records_with_samples(task, source, sample_key_sets)
                 rows.extend(_filter_rows(source_rows, include.get("where") or {}))
         if not rows:
             raise ValueError("view selection produced no records")
         return [to_plain(row) for row in rows]
+
+    def _compute_sample_key_sets(self, config: dict[str, Any]) -> list[dict[str, Any]]:
+        samples = config.get("sample") or []
+        if isinstance(samples, dict):
+            samples = [samples]
+        if not samples:
+            return []
+
+        includes = config.get("include") or []
+        plans: list[dict[str, Any]] = []
+        for sample in samples:
+            count = sample.get("count")
+            if count is None:
+                continue
+            count = int(count)
+            if count < 0:
+                raise ValueError("sample count must be non-negative")
+            level = sample.get("level", "document")
+            key_field = "record_id" if level == "record" else "page_id" if level == "page" else "document_id"
+            sources = set(sample.get("sources") or [])
+            tasks = set(sample.get("tasks") or [])
+            where = sample.get("where") or {}
+            seed = str(sample.get("seed", 42))
+
+            matched_keys: set[str] = set()
+            for include in includes:
+                task = include["task"]
+                if tasks and task not in tasks:
+                    continue
+                for source in include.get("sources") or []:
+                    if sources and source not in sources:
+                        continue
+                    matched_keys.update(
+                        self._read_sample_candidate_keys(task, source, key_field, include.get("where") or {}, where)
+                    )
+
+            selected_keys = set(
+                sorted(
+                    matched_keys,
+                    key=lambda key: hashlib.sha256(f"{seed}:{key}".encode("utf-8")).hexdigest(),
+                )[:count]
+            )
+            plans.append({**sample, "key_field": key_field, "selected_keys": selected_keys})
+        return plans
+
+    def _read_sample_candidate_keys(
+        self, task: str, source: str, key_field: str, include_where: dict[str, Any], sample_where: dict[str, Any]
+    ) -> set[str]:
+        # Fast path for the common case: sample by document/page/record without predicates.
+        if not include_where and not sample_where:
+            root = self.canonical_root / "records" / task / f"source={source}"
+            files = sorted(root.glob("*.parquet")) if root.is_dir() else [root]
+            keys: set[str] = set()
+            for file_path in files:
+                if file_path.exists():
+                    df = pd.read_parquet(file_path, columns=[key_field])
+                    keys.update(df[key_field].astype(str).tolist())
+            return keys
+
+        rows = self.canonical_reader.read_task_records(task, source)
+        rows = _filter_rows(rows, include_where)
+        rows = _filter_rows(rows, sample_where)
+        return {str(row[key_field]) for row in rows}
+
+    def _read_task_records_with_samples(
+        self, task: str, source: str, sample_key_sets: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        applicable = []
+        for sample in sample_key_sets:
+            sources = set(sample.get("sources") or [])
+            tasks = set(sample.get("tasks") or [])
+            if sources and source not in sources:
+                continue
+            if tasks and task not in tasks:
+                continue
+            applicable.append(sample)
+        if not applicable:
+            return self.canonical_reader.read_task_records(task, source)
+
+        root = self.canonical_root / "records" / task / f"source={source}"
+        files = sorted(root.glob("*.parquet")) if root.is_dir() else [root]
+        rows: list[dict[str, Any]] = []
+        for file_path in files:
+            if not file_path.exists():
+                continue
+            df = pd.read_parquet(file_path)
+            mask = pd.Series(True, index=df.index)
+            for sample in applicable:
+                key_field = sample["key_field"]
+                selected_keys = sample["selected_keys"]
+                mask &= df[key_field].astype(str).isin(selected_keys)
+            rows.extend(df.loc[mask].to_dict(orient="records"))
+        return rows
 
     def _apply_excludes(self, records: list[dict[str, Any]], excludes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not excludes:
@@ -132,6 +406,58 @@ class ViewBuilder:
             if not drop:
                 kept.append(record)
         return kept
+
+
+    def _apply_samples(self, records: list[dict[str, Any]], samples: list[dict[str, Any]] | dict[str, Any]) -> list[dict[str, Any]]:
+        if not samples:
+            return records
+        if isinstance(samples, dict):
+            samples = [samples]
+        kept_records = records
+        for sample in samples:
+            count = sample.get("count")
+            if count is None:
+                continue
+            count = int(count)
+            if count < 0:
+                raise ValueError("sample count must be non-negative")
+            level = sample.get("level", "document")
+            key_field = "record_id" if level == "record" else "page_id" if level == "page" else "document_id"
+            sources = set(sample.get("sources") or [])
+            tasks = set(sample.get("tasks") or [])
+            where = sample.get("where") or {}
+            seed = str(sample.get("seed", 42))
+
+            matched_keys: set[str] = set()
+            for record in kept_records:
+                if sources and record.get("source_name") not in sources:
+                    continue
+                if tasks and record.get("task") not in tasks:
+                    continue
+                if where and not _matches_where(record, where):
+                    continue
+                matched_keys.add(str(record[key_field]))
+
+            selected_keys = set(
+                sorted(
+                    matched_keys,
+                    key=lambda key: hashlib.sha256(f"{seed}:{key}".encode("utf-8")).hexdigest(),
+                )[:count]
+            )
+
+            next_records: list[dict[str, Any]] = []
+            for record in kept_records:
+                applies = True
+                if sources and record.get("source_name") not in sources:
+                    applies = False
+                if tasks and record.get("task") not in tasks:
+                    applies = False
+                if where and not _matches_where(record, where):
+                    applies = False
+                if not applies or str(record[key_field]) in selected_keys:
+                    next_records.append(record)
+            kept_records = next_records
+        return kept_records
 
     def _assign_splits(self, records: list[dict[str, Any]], split_policy: dict[str, Any]) -> dict[str, str]:
         level = split_policy.get("level", "document")
@@ -191,28 +517,47 @@ class ViewBuilder:
             "image_transform": image_transform,
         }
         label = serializer.serialize(record, context)
-        runtime_image_data = _transform_and_encode(asset.get("path"), image_transform)
-        if runtime_image_data is None:
-            runtime_image_data = _read_image_file_bytes(asset.get("path"))
         canonical_image_path = str(asset.get("path") or record["image_asset_id"])
         content_hash = stable_hash(record["record_id"] + prompt_template_id)
         view_id = stable_id("view", view_name, content_hash)
         view_asset_id = stable_id("view_asset", view_name, task, content_hash)
         image_materialization = ctx["image_materialization"]
         image_mode = image_materialization["mode"]
-        cache_assets = bool(image_materialization["cache_assets"])
+        runtime_image_data = None
+        runtime_image_transformed = False
+        if not ctx.get("schema_inference"):
+            runtime_image_data = _transform_and_encode(asset.get("path"), image_transform)
+            runtime_image_transformed = runtime_image_data is not None
+            if runtime_image_data is None:
+                runtime_image_data = _read_image_file_bytes(asset.get("path"))
         view_image_path = canonical_image_path
-        if image_mode == "embedded_bytes":
-            if cache_assets and runtime_image_data is not None:
-                view_image_path = _save_view_asset(runtime_image_data, view_asset_id, task, ctx["view_assets_dir"])
-            images_column = [{"bytes": runtime_image_data}] if runtime_image_data is not None else [{"image": view_image_path}]
+        extension = ".png" if runtime_image_transformed else _image_file_extension(asset.get("path"))
+        image_filename = f"{view_asset_id}{extension}"
+        images_bytes_column = None
+        images_path_column = None
+        if image_mode == "embedded":
+            if runtime_image_data is None:
+                if ctx.get("schema_inference"):
+                    images_bytes_column = [b""]
+                else:
+                    raise ValueError(f"embedded view cannot read image bytes for record {record['record_id']}")
+            else:
+                images_bytes_column = [runtime_image_data]
         else:
-            if image_mode == "cached" and runtime_image_data is not None:
+            if ctx.get("schema_inference"):
+                view_image_path = image_filename
+                images_path_column = [image_filename]
+            else:
+                if runtime_image_data is None:
+                    raise ValueError(f"source_reference view cannot read image bytes for record {record['record_id']}")
                 view_image_path = _save_view_asset(
-                    runtime_image_data, view_asset_id, task,
-                    ctx["view_assets_dir"]
+                    runtime_image_data,
+                    view_asset_id,
+                    task,
+                    ctx["view_assets_dir"],
+                    extension=extension,
                 )
-            images_column = [{"image": view_image_path}]
+                images_path_column = [view_image_path]
         messages = None
         if stage == "sft":
             messages = [
@@ -237,7 +582,8 @@ class ViewBuilder:
             prompt_template_id=prompt_template_id,
             split=split,  # type: ignore[arg-type]
             view_image_asset_id=view_asset_id,
-            images=images_column,
+            images_bytes=images_bytes_column,
+            images_path=images_path_column,
             data_source=task,
             extra_info={"sample_id": view_id, "task_type": task},
             messages=messages,
@@ -275,14 +621,25 @@ def _reward_profile_for_task(config: dict[str, Any], task: str) -> str:
 
 def _resolve_image_materialization(config: dict[str, Any]) -> dict[str, Any]:
     materialization = ((config.get("image_policy") or {}).get("materialization") or {})
-    mode = materialization.get("mode") or "embedded_bytes"
-    path_modes = {"cached", "path", "source_reference", "runtime"}
-    if mode not in {"embedded_bytes", *path_modes}:
+    mode = materialization.get("mode") or "embedded"
+    if mode not in {"embedded", "source_reference"}:
         raise ValueError(f"unsupported image materialization mode: {mode}")
-    cache_assets = bool(materialization.get("cache_assets", mode == "cached"))
-    if mode in path_modes:
-        cache_assets = mode == "cached"
-    return {"mode": mode, "cache_assets": cache_assets}
+    return {"mode": mode}
+
+
+def _uses_root_view_assets(image_materialization: dict[str, Any]) -> bool:
+    return image_materialization.get("mode") == "source_reference"
+
+
+def _resolve_rows_per_shard(config: dict[str, Any]) -> int | None:
+    policy = config.get("shard_policy") or config.get("sharding") or {}
+    value = policy.get("rows_per_shard", policy.get("shard_size"))
+    if value in (None, False, 0, "0"):
+        return None
+    rows_per_shard = int(value)
+    if rows_per_shard <= 0:
+        raise ValueError("rows_per_shard must be positive")
+    return rows_per_shard
 
 
 def _filter_rows(rows: list[dict[str, Any]], where: dict[str, Any]) -> list[dict[str, Any]]:
@@ -371,13 +728,45 @@ def _read_image_file_bytes(image_path: str | None) -> bytes | None:
         return None
 
 
-def _save_view_asset(image_data: bytes, asset_id: str, task: str, assets_dir: Path) -> str:
-    """Write image bytes to ``{assets_dir}/{task}/{asset_id}.png``, returning the absolute path."""
-    task_dir = assets_dir / task
-    task_dir.mkdir(parents=True, exist_ok=True)
-    asset_path = task_dir / f"{asset_id}.png"
+def _asset_dirs_for_row(ctx: dict[str, Any], split: str) -> tuple[Path, Path]:
+    resolver = ctx.get("asset_dir_resolver")
+    if resolver:
+        return resolver(split)
+    assets_dir = ctx["view_assets_dir"]
+    return assets_dir, assets_dir
+
+
+def _save_view_asset(
+    image_data: bytes,
+    asset_id: str,
+    task: str,
+    assets_dir: Path,
+    *,
+    return_assets_dir: Path | None = None,
+    extension: str = ".png",
+) -> str:
+    """Write image bytes to ``{assets_dir}/{asset_id}{extension}``, returning the filename."""
+    del task
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    asset_path = assets_dir / f"{asset_id}{_normalize_extension(extension)}"
     asset_path.write_bytes(image_data)
-    return str(asset_path)
+    return asset_path.name
+
+
+def _image_file_extension(image_path: str | None) -> str:
+    if not image_path:
+        return ".png"
+    extension = Path(str(image_path)).suffix
+    return _normalize_extension(extension)
+
+
+def _normalize_extension(extension: str | None) -> str:
+    if not extension:
+        return ".png"
+    extension = extension.lower()
+    if not extension.startswith("."):
+        extension = f".{extension}"
+    return extension
 
 
 def _transform_and_encode(image_path: str | None, image_transform: dict[str, Any]) -> bytes | None:

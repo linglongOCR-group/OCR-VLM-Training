@@ -213,7 +213,8 @@ class ViewRecord:
     prompt_template_id: str
     split: Literal["train", "val", "test"]
     view_image_asset_id: str | None = None
-    images: list | None = None
+    images_bytes: list[bytes] | None = None
+    images_path: list[str] | None = None
     system_prompt: str | None = None
     messages: list | None = None
     data_source: str | None = None

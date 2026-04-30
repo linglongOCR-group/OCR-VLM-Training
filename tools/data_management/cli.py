@@ -41,6 +41,7 @@ def main(argv: list[str] | None = None) -> None:
     validate_view_cmd.add_argument("view_root")
     validate_view_cmd.add_argument("--config")
     validate_view_cmd.add_argument("--require-images", action="store_true")
+    validate_view_cmd.add_argument("--image-assets-dir")
 
     reward_smoke = subparsers.add_parser("reward-smoke-test")
     reward_smoke.add_argument("--view", required=True)
@@ -99,8 +100,15 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "validate-view":
-        processing = load_processing_config(args.config)
-        validate_view(_resolve_view_arg(args.view_root, processing), require_images=args.require_images)
+        processing = load_processing_config(
+            args.config,
+            require_dataset_root=_view_arg_requires_dataset_root(args.view_root),
+        )
+        validate_view(
+            _resolve_view_arg(args.view_root, processing),
+            require_images=args.require_images,
+            image_assets_dir=args.image_assets_dir,
+        )
         print("view ok")
         return
 
@@ -139,6 +147,11 @@ def _resolve_view_arg(value: str, processing) -> Path:
     if value.startswith("views/"):
         return processing.dataset_root / path
     return processing.view_root / path
+
+
+def _view_arg_requires_dataset_root(value: str) -> bool:
+    path = Path(value)
+    return not path.is_absolute() and not path.exists()
 
 
 if __name__ == "__main__":
