@@ -1,8 +1,11 @@
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from tools.data_management.runtime.image_columns import resolve_runtime_images
+from tools.data_management.runtime.verl_multimodal_dataset import OcrMultiTurnSFTDataset, OcrRLHFDataset
 
 
 def test_runtime_images_prefers_embedded_bytes(tmp_path):
@@ -26,6 +29,11 @@ def test_runtime_images_resolves_filename_paths_against_assets_dir(tmp_path):
     assert images == [{"image": str(image_file)}]
 
 
+def test_runtime_images_rejects_missing_reference_asset(tmp_path):
+    with pytest.raises(FileNotFoundError, match="missing.png"):
+        resolve_runtime_images({"images_path": ["missing.png"]}, image_assets_dir=tmp_path)
+
+
 def test_runtime_images_rejects_path_mode_without_assets_dir():
     with pytest.raises(ValueError, match="image_assets_dir"):
         resolve_runtime_images({"images_path": ["asset.png"]})
@@ -37,3 +45,81 @@ def test_runtime_images_rejects_absolute_or_nested_paths(tmp_path):
 
     with pytest.raises(ValueError, match="filename"):
         resolve_runtime_images({"images_path": [str(tmp_path / "asset.png")]}, image_assets_dir=tmp_path)
+
+
+def test_ocr_rlhf_dataset_restores_fresh_runtime_images_after_embedded_build(tmp_path):
+    dataset = object.__new__(OcrRLHFDataset)
+    dataset.prompt_key = "prompt"
+    dataset.image_key = "runtime_images"
+    dataset.video_key = "videos"
+    dataset.processor = object()
+    dataset.image_assets_dir = tmp_path
+
+    image = _png_bytes()
+    row = {
+        "prompt": [{"role": "user", "content": "Read this <image>."}],
+        "images_bytes": [image],
+    }
+
+    messages = dataset._build_messages(row)
+
+    assert row["runtime_images"] == [{"bytes": image}]
+    assert "image" not in row["runtime_images"][0]
+    assert row["prompt"][0]["content"] == "Read this <image>."
+    assert messages[0]["content"][1]["type"] == "image"
+
+    messages = dataset._build_messages(row)
+    assert messages[0]["content"][1]["type"] == "image"
+
+
+def test_ocr_rlhf_dataset_resolves_reference_assets_for_verl_filter(tmp_path):
+    image_file = tmp_path / "asset.png"
+    image_file.write_bytes(_png_bytes())
+
+    dataset = object.__new__(OcrRLHFDataset)
+    dataset.prompt_key = "prompt"
+    dataset.image_key = "runtime_images"
+    dataset.video_key = "videos"
+    dataset.processor = object()
+    dataset.image_assets_dir = tmp_path
+    row = {
+        "prompt": [{"role": "user", "content": "Read this <image>."}],
+        "images_path": [image_file.name],
+    }
+
+    messages = dataset._build_messages(row)
+
+    assert row["runtime_images"] == [{"image": str(image_file)}]
+    assert row["prompt"][0]["content"] == "Read this <image>."
+    assert messages[0]["content"][1] == {"type": "image", "image": str(image_file)}
+
+
+def test_ocr_sft_dataset_builds_messages_without_mutating_source_columns(tmp_path):
+    dataset = object.__new__(OcrMultiTurnSFTDataset)
+    dataset.messages_key = "messages"
+    dataset.image_key = "runtime_images"
+    dataset.video_key = "videos"
+    dataset.processor = object()
+    dataset.image_patch_size = 14
+    dataset.image_assets_dir = tmp_path
+
+    image = _png_bytes()
+    row = {
+        "messages": [
+            {"role": "user", "content": "Read this <image>."},
+            {"role": "assistant", "content": "done"},
+        ],
+        "images_bytes": [image],
+    }
+
+    messages = dataset._build_messages(row)
+
+    assert "runtime_images" not in row
+    assert row["messages"][0]["content"] == "Read this <image>."
+    assert messages[0]["content"][1]["type"] == "image"
+
+
+def _png_bytes() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(buffer, format="PNG")
+    return buffer.getvalue()

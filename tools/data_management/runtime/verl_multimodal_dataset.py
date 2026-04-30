@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+from pathlib import Path
 from typing import Any
 
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
@@ -15,10 +17,14 @@ class OcrRLHFDataset(RLHFDataset):
         super().__init__(*args, **kwargs)
 
     def _build_messages(self, example: dict[str, Any]):
-        images = resolve_runtime_images(example, self.image_assets_dir)
-        example[self.image_key] = images
-        messages = super()._build_messages(example)
-        example[self.image_key] = images
+        working = _example_with_runtime_images(
+            example=example,
+            messages_key=self.prompt_key,
+            image_key=self.image_key,
+            image_assets_dir=self.image_assets_dir,
+        )
+        messages = super()._build_messages(working)
+        example[self.image_key] = resolve_runtime_images(example, self.image_assets_dir)
         return messages
 
 
@@ -29,5 +35,24 @@ class OcrMultiTurnSFTDataset(MultiTurnSFTDataset):
         super().__init__(*args, **kwargs)
 
     def _build_messages(self, example: dict[str, Any]):
-        example[self.image_key] = resolve_runtime_images(example, self.image_assets_dir)
-        return super()._build_messages(example)
+        working = _example_with_runtime_images(
+            example=example,
+            messages_key=self.messages_key,
+            image_key=self.image_key,
+            image_assets_dir=self.image_assets_dir,
+        )
+        return super()._build_messages(working)
+
+
+def _example_with_runtime_images(
+    *,
+    example: dict[str, Any],
+    messages_key: str,
+    image_key: str,
+    image_assets_dir: str | Path | None,
+) -> dict[str, Any]:
+    working = dict(example)
+    if messages_key in working:
+        working[messages_key] = copy.deepcopy(working[messages_key])
+    working[image_key] = resolve_runtime_images(example, image_assets_dir)
+    return working

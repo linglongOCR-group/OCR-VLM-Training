@@ -23,7 +23,10 @@ def resolve_runtime_images(row: dict[str, Any], image_assets_dir: str | Path | N
     for image_name in images_path:
         if not _is_valid_filename(image_name):
             raise ValueError(f"images_path entries must be filenames, got {image_name!r}")
-        resolved.append({"image": str(base / str(image_name))})
+        image_path = base / str(image_name)
+        if not image_path.is_file():
+            raise FileNotFoundError(f"images_path asset does not exist: {image_path}")
+        resolved.append({"image": str(image_path)})
     return resolved
 
 
