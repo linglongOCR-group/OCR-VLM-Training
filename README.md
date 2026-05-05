@@ -26,12 +26,12 @@ image asset manifests, and lineage. Views materialize model-specific SFT or RLVR
 training parquet with prompts, serialized labels, split assignments, and reward
 payloads.
 
-Set `OCR_DATASET_ROOT` once per environment. The data CLI derives
+Set `OCR_DATA_ROOT` once per environment. The data CLI derives
 `sources/`, `canonical/`, and `views/` from that root unless an explicit path is
 provided:
 
 ```bash
-export OCR_DATASET_ROOT=/home/byhou/datasets/ocr-training
+export OCR_DATA_ROOT=/home/byhou/datasets/ocr-training
 ```
 
 MinerU-annotated datasets can be converted into canonical partitions with the

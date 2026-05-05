@@ -793,6 +793,7 @@ All views should contain:
 | `stage`               |      Yes | `sft`, `rlvr`, or `eval`      |
 | `task`                |      Yes | Task name                     |
 | `image_path`          |      Yes | Lineage/debug image path      |
+| `images`              | Optional | VERL-native nested image refs |
 | `images_bytes`        | Optional | Embedded runtime image bytes  |
 | `images_path`         | Optional | Source-reference filenames    |
 | `prompt`              |      Yes | Model input prompt            |
@@ -1139,13 +1140,13 @@ Recommended default:
 
 | VERL Concept     | View Column                             |
 | ---------------- | --------------------------------------- |
-| Multimodal input | `images_bytes` or `images_path`         |
+| Multimodal input | `images`, `images_bytes`, or `images_path` |
 | Prompt           | `prompt`                                |
 | Ground truth     | `label` or `answer_key`                 |
 | Reward config    | `reward_profile_id`                     |
 | Reward payload   | `reward_payload` or `reward_payload_id` |
 
-`image_path` is retained for lineage and debugging. `embedded` mode writes `images_bytes: list<binary>` and leaves `images_path` null. `source_reference` mode copies identity images or writes transformed images under `views/<view>/assets/`, then writes filenames only into `images_path` and leaves `images_bytes` null. VERL integration uses the repo-local dataset wrapper to convert either column into VERL's in-memory image input shape at load time.
+`image_path` is retained for lineage and debugging. `embedded` mode writes `images_bytes: list<binary>`. `source_reference` mode writes dataset-root-relative paths into `images_path`: identity images reference canonical/source assets, while transformed images are saved under `views/<view>/assets/`. `nested_reference` mode writes the original VERL `images: [{"image": "..."}]` shape with the same dataset-root-relative path policy. VERL integration uses the repo-local dataset wrapper to resolve paths against `OCR_DATA_ROOT` before passing image inputs to VERL.
 
 For large embedded-image SFT or RLVR views, write sharded split outputs with:
 

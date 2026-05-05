@@ -213,6 +213,7 @@ class ViewRecord:
     prompt_template_id: str
     split: Literal["train", "val", "test"]
     view_image_asset_id: str | None = None
+    images: list[dict[str, str]] | None = None
     images_bytes: list[bytes] | None = None
     images_path: list[str] | None = None
     system_prompt: str | None = None
@@ -255,7 +256,10 @@ class ViewRecord:
 
     def to_dict(self) -> JsonDict:
         self.validate()
-        return asdict(self)
+        data = asdict(self)
+        if self.images is None:
+            data.pop("images", None)
+        return data
 
 
 @dataclass(slots=True)

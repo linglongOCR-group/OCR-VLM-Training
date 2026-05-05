@@ -97,7 +97,7 @@ When these records are materialized as portable VERL view Parquet, the runtime i
 }
 ```
 
-Path-backed runtime images are represented only by `source_reference` mode. In that mode, runtime filenames in `images_path` refer to images copied or transformed into the view's own `assets/` directory; absolute source or canonical paths are not written as runtime image references.
+Path-backed portable runtime images are represented by `source_reference` mode. In that mode, identity runtime paths in `images_path` reference canonical/source assets relative to `OCR_DATA_ROOT`; transformed images are saved under the view's own `assets/` directory and are also referenced with dataset-root-relative paths. Use `nested_reference` when the view should keep VERL's original `images: [{"image": "..."}]` shape; this mode follows the same dataset-root-relative path policy.
 
 For large embedded-byte views used by VERL SFT, shard the split output so each
 file can be read independently by pandas/pyarrow:

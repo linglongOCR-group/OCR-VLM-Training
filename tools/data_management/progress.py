@@ -44,7 +44,7 @@ class ProgressReporter:
             self._draw_bar(event, current, total=total, **fields)
             return
         if force or current == 1 or current % self.log_every == 0 or (total is not None and current >= total):
-            self.log(event, current=current, total=total, **fields)
+            self.log(event, current=current, total=total, **self._monitoring_fields(current, total), **fields)
 
     def finish(self, event: str, *, total: int | None = None, **fields: Any) -> None:
         if not self.enabled:
@@ -83,6 +83,19 @@ class ProgressReporter:
         self.stream.write(f"\r[docds] {event} [{bar}] {count} {rate:.1f}/s{suffix}")
         self.stream.flush()
         self._bar_active = True
+
+    def _monitoring_fields(self, current: int, total: int | None) -> dict[str, Any]:
+        elapsed = max(time.monotonic() - self.started_at, 1e-9)
+        rate = current / elapsed
+        fields: dict[str, Any] = {
+            "elapsed_s": round(elapsed, 1),
+            "rate_per_s": round(rate, 2),
+        }
+        if total:
+            remaining = max(total - current, 0)
+            fields["pct"] = round(min(max(current / total, 0.0), 1.0) * 100, 1)
+            fields["eta_s"] = round(remaining / rate, 1) if rate > 0 else None
+        return fields
 
     def _clear_bar(self) -> None:
         if self._bar_active:

@@ -26,8 +26,13 @@ def main(argv: list[str] | None = None) -> None:
     export_source.add_argument("--tasks")
     export_source.add_argument("--max-samples", type=int)
     export_source.add_argument("--skip-errors", action="store_true")
+    export_source.add_argument("--skip-completed", action="store_true")
     export_source.add_argument("--allow-unreadable-images", action="store_true")
-    export_source.add_argument("--overwrite-partitions", action="store_true", default=True)
+    export_source.add_argument("--overwrite-partitions", dest="overwrite_partitions", action="store_true", default=None)
+    export_source.add_argument("--no-overwrite-partitions", dest="overwrite_partitions", action="store_false")
+    export_source.add_argument("--num-workers", type=int)
+    export_source.add_argument("--worker-chunksize", type=int)
+    export_source.add_argument("--max-in-flight", type=int)
     _add_progress_args(export_source)
 
     validate_canonical_cmd = subparsers.add_parser("validate-canonical")
@@ -50,6 +55,9 @@ def main(argv: list[str] | None = None) -> None:
     validate_view_cmd.add_argument("--config")
     validate_view_cmd.add_argument("--require-images", action="store_true")
     validate_view_cmd.add_argument("--image-assets-dir")
+    validate_view_cmd.add_argument("--max-aspect-ratio", type=float, default=200.0)
+    validate_view_cmd.add_argument("--num-workers", type=int, default=1)
+    validate_view_cmd.add_argument("--worker-batch-size", type=int, default=1024)
 
     reward_smoke = subparsers.add_parser("reward-smoke-test")
     reward_smoke.add_argument("--view", required=True)
@@ -81,8 +89,17 @@ def main(argv: list[str] | None = None) -> None:
             adapter.options.max_samples = args.max_samples
         if args.skip_errors:
             adapter.options.skip_errors = True
+        if args.skip_completed:
+            adapter.options.skip_completed = True
         if args.allow_unreadable_images:
             adapter.options.allow_unreadable_images = True
+        if args.num_workers is not None:
+            adapter.options.num_workers = args.num_workers
+        if args.worker_chunksize is not None:
+            adapter.options.worker_chunksize = args.worker_chunksize
+        if args.max_in_flight is not None:
+            adapter.options.max_in_flight = args.max_in_flight
+        adapter.options.__post_init__()
         canonical_root = (
             Path(args.canonical_root)
             if args.canonical_root
@@ -91,10 +108,13 @@ def main(argv: list[str] | None = None) -> None:
         )
         tasks = args.tasks.split(",") if args.tasks else None
         progress = _make_progress(args, root=Path(canonical_root).parent)
+        overwrite_partitions = args.overwrite_partitions
+        if overwrite_partitions is None:
+            overwrite_partitions = not adapter.options.skip_completed
         report = adapter.export(
             canonical_root,
             tasks=tasks,
-            overwrite_partitions=args.overwrite_partitions,
+            overwrite_partitions=overwrite_partitions,
             progress=progress,
         )
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
@@ -130,6 +150,9 @@ def main(argv: list[str] | None = None) -> None:
             _resolve_view_arg(args.view_root, processing),
             require_images=args.require_images,
             image_assets_dir=args.image_assets_dir,
+            max_aspect_ratio=args.max_aspect_ratio,
+            num_workers=args.num_workers,
+            worker_batch_size=args.worker_batch_size,
         )
         print("view ok")
         return

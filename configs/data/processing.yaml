@@ -1,5 +1,5 @@
 paths:
-  dataset_root: ${oc.env:OCR_DATASET_ROOT}
+  dataset_root: ${oc.env:OCR_DATA_ROOT}
   source_root: sources
   canonical_root: canonical
   view_root: views

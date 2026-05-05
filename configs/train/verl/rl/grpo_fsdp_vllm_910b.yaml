@@ -9,7 +9,7 @@ data:
   val_files: ${oc.env:VAL_FILE}
   prompt_key: prompt
   image_key: runtime_images
-  image_assets_dir: ${oc.env:VIEW_IMAGE_ASSETS_DIR,}
+  data_root: ${oc.env:OCR_DATA_ROOT,}
   custom_cls:
     path: ${oc.env:PROJECT_ROOT}/tools/data_management/runtime/verl_multimodal_dataset.py
     name: OcrRLHFDataset

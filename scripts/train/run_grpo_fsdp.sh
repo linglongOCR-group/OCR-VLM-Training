@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/cann-8.5.0/share/info/ascendnpu-ir/bin/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
+
+set -euo pipefail
 
 PROJECT_ROOT=${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 export PROJECT_ROOT
@@ -50,7 +50,7 @@ TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-null}
 RESUME_MODE=${RESUME_MODE:-auto}
 VALIDATE_GRPO_VIEW=${VALIDATE_GRPO_VIEW:-True}
 VALIDATE_GRPO_MAX_ROWS_PER_FILE=${VALIDATE_GRPO_MAX_ROWS_PER_FILE:-1000}
-VIEW_IMAGE_ASSETS_DIR=${VIEW_IMAGE_ASSETS_DIR:-}
+OCR_DATA_ROOT=${OCR_DATA_ROOT:-}
 DISABLE_FLASHCOMM_FOR_TP1=${DISABLE_FLASHCOMM_FOR_TP1:-True}
 ENABLE_ASCEND_PERF_ENV=${ENABLE_ASCEND_PERF_ENV:-False}
 ENABLE_JEMALLOC=${ENABLE_JEMALLOC:-False}
@@ -86,9 +86,6 @@ fi
 
 if [ "${VALIDATE_GRPO_VIEW}" = "True" ]; then
   VALIDATE_IMAGE_ARGS=()
-  if [ -n "${VIEW_IMAGE_ASSETS_DIR}" ]; then
-    VALIDATE_IMAGE_ARGS+=(--image-assets-dir="${VIEW_IMAGE_ASSETS_DIR}")
-  fi
   if [ "${USE_VALIDATION}" = "True" ]; then
     python -m tools.data_management.validate_grpo_view \
       --max-rows-per-file="${VALIDATE_GRPO_MAX_ROWS_PER_FILE}" \
@@ -114,7 +111,7 @@ python -m verl.trainer.main_ppo \
   data.val_files="${VAL_FILE}" \
   data.prompt_key=prompt \
   data.image_key=runtime_images \
-  +data.image_assets_dir="${VIEW_IMAGE_ASSETS_DIR}" \
+  +data.data_root="${OCR_DATA_ROOT}" \
   data.custom_cls.path="${PROJECT_ROOT}/tools/data_management/runtime/verl_multimodal_dataset.py" \
   data.custom_cls.name=OcrRLHFDataset \
   data.reward_fn_key=data_source \

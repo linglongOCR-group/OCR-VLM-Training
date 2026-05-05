@@ -1,8 +1,11 @@
 import json
+import shutil
 from io import BytesIO, StringIO
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pytest
 import yaml
 from PIL import Image
 
@@ -12,9 +15,11 @@ from tools.data_management.config import load_processing_config
 from tools.data_management.progress import ProgressReporter
 from tools.data_management.prompts import load_prompt_config, resolve_prompt
 from tools.data_management.serializers.layout_mineru import MinerULayoutSerializer
+from tools.data_management.sources.adapters.hybrid_message import HybridMessageExportOptions, HybridMessageSourceAdapter
 from tools.data_management.sources.adapters.mineru import MinerUExportOptions, MinerUSourceAdapter
 from tools.data_management.validate_grpo_view import validate_grpo_view
 from tools.data_management.views import ViewBuilder, reward_smoke_test, score_predictions, validate_view
+from tools.data_management.views.builder import _SplitParquetWriter
 
 
 def _minimal_png(width: int = 100, height: int = 200) -> bytes:
@@ -122,6 +127,194 @@ def _export_fake_canonical(tmp_path: Path) -> Path:
     return canonical_root
 
 
+def _set_asset_dimensions(canonical_root: Path, asset_id: str, *, width: int, height: int) -> None:
+    manifest_path = canonical_root / "assets/manifests/source=FakeMinerU/part-00000.parquet"
+    assets = pd.read_parquet(manifest_path)
+    mask = assets["asset_id"] == asset_id
+    assert mask.any()
+    assets.loc[mask, "width"] = width
+    assets.loc[mask, "height"] = height
+    assets.to_parquet(manifest_path, index=False)
+
+
+def test_mineru_parallel_export_matches_serial_output(tmp_path):
+    serial_dataset_root = tmp_path / "serial"
+    serial_mineru_root = serial_dataset_root / "mineru"
+    serial_source_root = serial_dataset_root / "source"
+    _write_fake_mineru_dataset(serial_mineru_root, serial_source_root, sample="paper_001")
+    _write_fake_mineru_dataset(serial_mineru_root, serial_source_root, sample="paper_002")
+
+    parallel_dataset_root = tmp_path / "parallel"
+    parallel_mineru_root = parallel_dataset_root / "mineru"
+    parallel_source_root = parallel_dataset_root / "source"
+    _write_fake_mineru_dataset(parallel_mineru_root, parallel_source_root, sample="paper_001")
+    _write_fake_mineru_dataset(parallel_mineru_root, parallel_source_root, sample="paper_002")
+
+    serial_root = serial_dataset_root / "canonical"
+    parallel_root = parallel_dataset_root / "canonical"
+    base_options = {
+        "dataset_name": "FakeMinerU",
+        "allow_unreadable_images": True,
+    }
+
+    serial_report = MinerUSourceAdapter(
+        MinerUExportOptions(**base_options, mineru_root=serial_mineru_root, source_image_root=serial_source_root)
+    ).export(serial_root)
+    parallel_report = MinerUSourceAdapter(
+        MinerUExportOptions(
+            **base_options,
+            mineru_root=parallel_mineru_root,
+            source_image_root=parallel_source_root,
+            num_workers=2,
+            worker_chunksize=1,
+            max_in_flight=2,
+        )
+    ).export(parallel_root)
+
+    assert parallel_report.to_dict() == serial_report.to_dict()
+    validate_canonical(parallel_root, source="FakeMinerU")
+
+    def normalize_temp_root(value, root: Path):
+        if isinstance(value, str):
+            return value.replace(str(root), "<dataset_root>")
+        if hasattr(value, "tolist"):
+            return normalize_temp_root(value.tolist(), root)
+        if isinstance(value, dict):
+            return {key: normalize_temp_root(item, root) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize_temp_root(item, root) for item in value]
+        return value
+
+    for relative in [
+        "entities/documents/source=FakeMinerU/part-00000.parquet",
+        "entities/pages/source=FakeMinerU/part-00000.parquet",
+        "entities/regions/source=FakeMinerU/part-00000.parquet",
+        "assets/manifests/source=FakeMinerU/part-00000.parquet",
+        "records/text/source=FakeMinerU/part-00000.parquet",
+        "records/table/source=FakeMinerU/part-00000.parquet",
+        "records/formula/source=FakeMinerU/part-00000.parquet",
+        "records/layout/source=FakeMinerU/part-00000.parquet",
+    ]:
+        serial_frame = pd.read_parquet(serial_root / relative)
+        parallel_frame = pd.read_parquet(parallel_root / relative)
+        sort_column = next(
+            column
+            for column in ("document_id", "page_id", "region_id", "asset_id", "record_id")
+            if column in serial_frame.columns
+        )
+        serial_frame = serial_frame.sort_values(sort_column).reset_index(drop=True)
+        parallel_frame = parallel_frame.sort_values(sort_column).reset_index(drop=True)
+        assert normalize_temp_root(parallel_frame.to_dict(orient="records"), parallel_dataset_root) == normalize_temp_root(
+            serial_frame.to_dict(orient="records"),
+            serial_dataset_root,
+        )
+
+
+def test_mineru_export_skip_completed_appends_missing_samples(tmp_path):
+    mineru_root = tmp_path / "mineru"
+    source_root = tmp_path / "source"
+    canonical_root = tmp_path / "canonical"
+    _write_fake_mineru_dataset(mineru_root, source_root, sample="paper_001")
+    _write_fake_mineru_dataset(mineru_root, source_root, sample="paper_002")
+
+    MinerUSourceAdapter(
+        MinerUExportOptions(
+            mineru_root=mineru_root,
+            source_image_root=source_root,
+            dataset_name="FakeMinerU",
+            max_samples=1,
+            allow_unreadable_images=True,
+        )
+    ).export(canonical_root)
+
+    stream = StringIO()
+    progress = ProgressReporter(enabled=True, log_every=1, stream=stream, root=tmp_path)
+    report = MinerUSourceAdapter(
+        MinerUExportOptions(
+            mineru_root=mineru_root,
+            source_image_root=source_root,
+            dataset_name="FakeMinerU",
+            allow_unreadable_images=True,
+            skip_completed=True,
+            num_workers=2,
+            worker_chunksize=1,
+            max_in_flight=2,
+        )
+    ).export(canonical_root, overwrite_partitions=False, progress=progress)
+
+    assert report.documents == 2
+    validate_canonical(canonical_root, source="FakeMinerU")
+    documents = pd.concat(
+        pd.read_parquet(path)
+        for path in sorted((canonical_root / "entities/documents/source=FakeMinerU").glob("part-*.parquet"))
+    )
+    assert sorted(documents["source_document_id"]) == ["paper_001", "paper_002"]
+    assert documents["document_id"].is_unique
+    assert "phase=skip_completed" in stream.getvalue()
+
+
+def test_progress_update_logs_monitoring_metrics():
+    stream = StringIO()
+    progress = ProgressReporter(enabled=True, log_every=1, stream=stream, force_tty=False)
+
+    progress.update("export-source", 5, total=10, workers=2, skipped_completed=1)
+
+    logs = stream.getvalue()
+    assert "elapsed_s=" in logs
+    assert "rate_per_s=" in logs
+    assert "pct=50.0" in logs
+    assert "eta_s=" in logs
+    assert "workers=2" in logs
+    assert "skipped_completed=1" in logs
+
+
+def test_hybrid_message_adapter_copies_text_images_to_canonical_region_crops(tmp_path):
+    dataset_root = tmp_path
+    source_image = dataset_root / "external" / "line.jpg"
+    source_image.parent.mkdir()
+    source_image.write_bytes(_minimal_png(32, 12))
+    data_file = dataset_root / "sources" / "UniRec_990K" / "data.json"
+    data_file.parent.mkdir(parents=True)
+    data_file.write_text(
+        json.dumps(
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "<image>\nText Recognition:"},
+                        {"role": "assistant", "content": "hello"},
+                    ],
+                    "images": [str(source_image)],
+                }
+            ]
+        )
+    )
+    canonical_root = dataset_root / "canonical"
+
+    report = HybridMessageSourceAdapter(
+        HybridMessageExportOptions(
+            data_file=data_file,
+            dataset_name="UniRec_990K",
+            allow_unreadable_images=False,
+        )
+    ).export(canonical_root)
+
+    assert report.task_records == {"text": 1}
+    assets = pd.read_parquet(canonical_root / "assets/manifests/source=UniRec_990K/part-00000.parquet")
+    regions = pd.read_parquet(canonical_root / "entities/regions/source=UniRec_990K/part-00000.parquet")
+    text = pd.read_parquet(canonical_root / "records/text/source=UniRec_990K/part-00000.parquet").iloc[0]
+
+    crop_assets = assets[assets["asset_type"] == "region_crop"]
+    assert len(crop_assets) == 1
+    crop_asset = crop_assets.iloc[0]
+    assert not Path(crop_asset["path"]).is_absolute()
+    assert crop_asset["path"].startswith("canonical/assets/files/source=UniRec_990K/region_crop/")
+    assert (dataset_root / crop_asset["path"]).is_file()
+    assert _decode_png((dataset_root / crop_asset["path"]).read_bytes()).size == (32, 12)
+    assert text["image_asset_id"] == crop_asset["asset_id"]
+    assert text["metadata"]["uses_page_image"] is False
+    assert regions.iloc[0]["crop_asset_id"] == crop_asset["asset_id"]
+
+
 def test_mineru_adapter_writes_spec_partitions(tmp_path):
     canonical_root = _export_fake_canonical(tmp_path)
 
@@ -138,6 +331,41 @@ def test_mineru_adapter_writes_spec_partitions(tmp_path):
     layout = pd.read_parquet(canonical_root / "records/layout/source=FakeMinerU/part-00000.parquet").iloc[0]
     assert layout["target"]["coordinate_space"] == "canonical_page_pixel_xyxy"
     assert list(layout["target"]["elements"][0]["bbox"]) == [100, 200, 900, 400]
+
+
+def test_mineru_adapter_crops_regions_into_canonical_assets(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    dataset_root = canonical_root.parent
+
+    assets = pd.read_parquet(canonical_root / "assets/manifests/source=FakeMinerU/part-00000.parquet")
+    regions = pd.read_parquet(canonical_root / "entities/regions/source=FakeMinerU/part-00000.parquet")
+    records = {
+        task: pd.read_parquet(canonical_root / f"records/{task}/source=FakeMinerU/part-00000.parquet")
+        for task in ("text", "table", "formula")
+    }
+
+    assert not any(Path(path).is_absolute() for path in assets["path"])
+    assert not any(str(path).startswith("mineru/") for path in assets["path"])
+
+    crop_assets = assets[assets["asset_type"] == "region_crop"]
+    assert len(crop_assets) == 3
+    for _, crop_asset in crop_assets.iterrows():
+        crop_path = dataset_root / crop_asset["path"]
+        assert crop_path.is_file()
+        assert crop_path.is_relative_to(canonical_root / "assets" / "files")
+        assert crop_asset["parent_asset_id"]
+        assert crop_asset["transform"]["source"] == "source_image_bbox"
+
+    for _, region in regions.iterrows():
+        assert region["crop_asset_id"] in set(crop_assets["asset_id"])
+
+    table = records["table"].iloc[0]
+    table_asset = crop_assets[crop_assets["asset_id"] == table["image_asset_id"]].iloc[0]
+    assert _decode_png((dataset_root / table_asset["path"]).read_bytes()).size == (60, 60)
+    assert table["metadata"]["uses_page_image"] is False
+
+    for frame in records.values():
+        assert set(frame["image_asset_id"]).issubset(set(crop_assets["asset_id"]))
 
 
 def test_layout_serializer_outputs_mineru_1000_grid():
@@ -202,7 +430,7 @@ def test_prompt_config_resolves_task_prompt():
 
 def test_processing_config_derives_dataset_subdirectories(monkeypatch, tmp_path):
     dataset_root = tmp_path / "dataset"
-    monkeypatch.setenv("OCR_DATASET_ROOT", str(dataset_root))
+    monkeypatch.setenv("OCR_DATA_ROOT", str(dataset_root))
 
     config = load_processing_config()
 
@@ -369,7 +597,6 @@ def test_view_image_assets_with_source_reference_policy(tmp_path):
         "include": [{"task": "layout", "sources": ["FakeMinerU"]}],
         "target_serialization": {"layout": "mineru_layout_box_v1"},
         "image_policy": {"materialization": {"mode": "source_reference"}},
-        "image_transform": {"layout": {"pad_to_square": True, "resize_to": 128}},
         "reward_profile": {"default": "normalized_levenshtein_v1"},
         "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
     }
@@ -384,16 +611,273 @@ def test_view_image_assets_with_source_reference_policy(tmp_path):
     assert len(images_path) == 1
     assert not _as_list(row["images_bytes"])
     assert "images" not in train.columns
-    assert Path(images_path[0]).name == images_path[0]
     assert not Path(images_path[0]).is_absolute()
-    assert "/" not in images_path[0]
-    assert (view_root / "assets" / images_path[0]).is_file()
+    assert (canonical_root.parent / images_path[0]).is_file()
+    assert not (view_root / "assets").exists()
     assert row["image_path"] == images_path[0]
 
-    # View asset files exist on disk
-    assets_dir = view_root / "assets"
-    assert assets_dir.is_dir()
-    assert len(list(assets_dir.glob("*.png"))) > 0
+
+def test_view_image_assets_with_nested_reference_policy(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "test_nested_reference_view"
+    config = {
+        "name": "test_nested_reference_view",
+        "stage": "rlvr",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "layout", "sources": ["FakeMinerU"]}],
+        "target_serialization": {"layout": "mineru_layout_box_v1"},
+        "image_policy": {"materialization": {"mode": "nested_reference"}},
+        "reward_profile": {"default": "normalized_levenshtein_v1"},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    validate_view(view_root, require_images=True)
+    validate_grpo_view([view_root])
+    train = pd.read_parquet(view_root / "train.parquet")
+    row = train.iloc[0]
+
+    images = _as_list(row["images"])
+    assert len(images) == 1
+    assert not _as_list(row["images_bytes"])
+    assert not _as_list(row["images_path"])
+    assert not Path(images[0]["image"]).is_absolute()
+    assert (canonical_root.parent / images[0]["image"]).is_file()
+    assert row["image_path"] == images[0]["image"]
+    assert not (view_root / "assets").exists()
+
+
+def test_view_aspect_ratio_filter_drops_records_above_threshold(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "test_aspect_ratio_filter"
+    text_record = pd.read_parquet(canonical_root / "records/text/source=FakeMinerU/part-00000.parquet").iloc[0]
+    _set_asset_dimensions(canonical_root, text_record["image_asset_id"], width=201, height=1)
+    config = {
+        "name": "test_aspect_ratio_filter",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [
+            {"task": "layout", "sources": ["FakeMinerU"]},
+            {"task": "text", "sources": ["FakeMinerU"]},
+        ],
+        "image_policy": {"materialization": {"mode": "nested_reference"}, "filter": {"max_aspect_ratio": 200}},
+        "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    validate_view(view_root, require_images=True)
+    train = pd.read_parquet(view_root / "train.parquet")
+    stats = json.loads((view_root / "stats.json").read_text())
+
+    assert train["task"].tolist() == ["layout"]
+    assert stats["total_records"] == 1
+    assert stats["filtered_records"] == 1
+    assert stats["filter_counts"] == {"aspect_ratio": 1, "invalid_dimensions": 0}
+
+
+def test_view_aspect_ratio_filter_keeps_boundary_ratio(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "test_aspect_ratio_filter_boundary"
+    text_record = pd.read_parquet(canonical_root / "records/text/source=FakeMinerU/part-00000.parquet").iloc[0]
+    _set_asset_dimensions(canonical_root, text_record["image_asset_id"], width=200, height=1)
+    config = {
+        "name": "test_aspect_ratio_filter_boundary",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+        "image_policy": {"materialization": {"mode": "nested_reference"}, "filter": {"max_aspect_ratio": 200}},
+        "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    train = pd.read_parquet(view_root / "train.parquet")
+    stats = json.loads((view_root / "stats.json").read_text())
+
+    assert train["task"].tolist() == ["text"]
+    assert "filtered_records" not in stats
+
+
+def test_view_aspect_ratio_filter_is_disabled_by_default(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "test_aspect_ratio_filter_disabled"
+    text_record = pd.read_parquet(canonical_root / "records/text/source=FakeMinerU/part-00000.parquet").iloc[0]
+    _set_asset_dimensions(canonical_root, text_record["image_asset_id"], width=1000, height=1)
+    config = {
+        "name": "test_aspect_ratio_filter_disabled",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+        "image_policy": {"materialization": {"mode": "nested_reference"}},
+        "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    train = pd.read_parquet(view_root / "train.parquet")
+    stats = json.loads((view_root / "stats.json").read_text())
+
+    assert train["task"].tolist() == ["text"]
+    assert "filtered_records" not in stats
+
+
+def test_view_aspect_ratio_filter_uses_transformed_dimensions(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "test_aspect_ratio_filter_transform"
+    layout_record = pd.read_parquet(canonical_root / "records/layout/source=FakeMinerU/part-00000.parquet").iloc[0]
+    _set_asset_dimensions(canonical_root, layout_record["image_asset_id"], width=1000, height=1)
+    config = {
+        "name": "test_aspect_ratio_filter_transform",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "layout", "sources": ["FakeMinerU"]}],
+        "image_policy": {"materialization": {"mode": "nested_reference"}, "filter": {"max_aspect_ratio": 200}},
+        "image_transform": {"layout": {"pad_to_square": True, "resize_to": 128}},
+        "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    validate_view(view_root, require_images=True)
+    train = pd.read_parquet(view_root / "train.parquet")
+    stats = json.loads((view_root / "stats.json").read_text())
+
+    assert train["task"].tolist() == ["layout"]
+    assert _as_list(train.iloc[0]["images"])[0]["image"].startswith("views/test_aspect_ratio_filter_transform/assets/")
+    assert "filtered_records" not in stats
+
+
+def test_validate_view_rejects_image_aspect_ratio_at_limit(tmp_path):
+    view_root = tmp_path / "views" / "invalid_aspect_ratio"
+    view_root.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "id": "row-1",
+                "stage": "sft",
+                "task": "text",
+                "image_path": "canonical/assets/files/source=Fake/image.png",
+                "prompt": ["<image>"],
+                "label": "text",
+                "canonical_record_id": "record-1",
+                "split": "train",
+                "images_bytes": [_minimal_png(200, 1)],
+            }
+        ]
+    ).to_parquet(view_root / "train.parquet", index=False)
+
+    with pytest.raises(ValueError, match="aspect ratio"):
+        validate_view(view_root, require_images=True)
+
+
+def test_validate_view_parallel_rejects_image_aspect_ratio_at_limit(tmp_path):
+    view_root = tmp_path / "views" / "parallel_invalid_aspect_ratio"
+    split_root = view_root / "train"
+    split_root.mkdir(parents=True)
+    base_row = {
+        "stage": "sft",
+        "task": "text",
+        "image_path": "canonical/assets/files/source=Fake/image.png",
+        "prompt": ["<image>"],
+        "label": "text",
+        "split": "train",
+        "images_bytes": [_minimal_png(10, 10)],
+    }
+    pd.DataFrame(
+        [
+            {"id": "row-1", "canonical_record_id": "record-1", **base_row},
+            {
+                "id": "row-2",
+                "canonical_record_id": "record-2",
+                **base_row,
+                "images_bytes": [_minimal_png(200, 1)],
+            },
+        ]
+    ).to_parquet(split_root / "part-00000.parquet", index=False, row_group_size=1)
+
+    with pytest.raises(ValueError, match="aspect ratio"):
+        validate_view(view_root, require_images=True, num_workers=2, worker_batch_size=1)
+
+
+def test_split_parquet_writer_recreates_missing_temp_dir(tmp_path):
+    schema = pd.DataFrame(
+        [
+            {
+                "id": "row-1",
+                "split": "train",
+            }
+        ]
+    ).to_parquet(tmp_path / "schema_sample.parquet", index=False)
+    del schema
+    sample = pd.read_parquet(tmp_path / "schema_sample.parquet")
+    writer = _SplitParquetWriter(
+        tmp_path / "view",
+        pa.Schema.from_pandas(sample),
+        rows_per_shard=1,
+    )
+
+    shutil.rmtree(tmp_path / "view" / "train.tmp")
+    writer.write({"id": "row-1", "split": "train"})
+    split_counts = writer.finish()
+
+    assert split_counts["train"] == 1
+    assert (tmp_path / "view" / "train" / "part-00000.parquet").is_file()
+
+
+def test_source_reference_transform_writes_view_asset_relative_path(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "test_source_reference_transform"
+    config = {
+        "name": "test_source_reference_transform",
+        "stage": "rlvr",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "layout", "sources": ["FakeMinerU"]}],
+        "target_serialization": {"layout": "mineru_layout_box_v1"},
+        "image_policy": {"materialization": {"mode": "source_reference"}},
+        "image_transform": {"layout": {"pad_to_square": True, "resize_to": 128}},
+        "reward_profile": {"default": "normalized_levenshtein_v1"},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    validate_view(view_root, require_images=True)
+    train = pd.read_parquet(view_root / "train.parquet")
+    image_path = _as_list(train.iloc[0]["images_path"])[0]
+
+    assert image_path.startswith("views/test_source_reference_transform/assets/")
+    assert not Path(image_path).is_absolute()
+    assert (canonical_root.parent / image_path).is_file()
+    assert train.iloc[0]["image_path"] == image_path
+
+
+def test_nested_reference_transform_writes_view_asset_relative_path(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "test_nested_reference_transform"
+    config = {
+        "name": "test_nested_reference_transform",
+        "stage": "rlvr",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "layout", "sources": ["FakeMinerU"]}],
+        "target_serialization": {"layout": "mineru_layout_box_v1"},
+        "image_policy": {"materialization": {"mode": "nested_reference"}},
+        "image_transform": {"layout": {"pad_to_square": True, "resize_to": 128}},
+        "reward_profile": {"default": "normalized_levenshtein_v1"},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+    validate_view(view_root, require_images=True)
+    train = pd.read_parquet(view_root / "train.parquet")
+    image_path = _as_list(train.iloc[0]["images"])[0]["image"]
+
+    assert image_path.startswith("views/test_nested_reference_transform/assets/")
+    assert not Path(image_path).is_absolute()
+    assert (canonical_root.parent / image_path).is_file()
+    assert train.iloc[0]["image_path"] == image_path
 
 
 def test_parallel_view_build_matches_single_process_output(tmp_path):
@@ -451,9 +935,9 @@ def test_parallel_source_reference_build_writes_reachable_assets(tmp_path):
     ViewBuilder(canonical_root, view_root).build(config, num_workers=2, worker_batch_size=1)
 
     train = pd.read_parquet(view_root / "train.parquet")
-    image_name = _as_list(train.iloc[0]["images_path"])[0]
-    assert Path(image_name).name == image_name
-    assert (view_root / "assets" / image_name).is_file()
+    image_path = _as_list(train.iloc[0]["images_path"])[0]
+    assert image_path.startswith("views/parallel_source_reference/assets/")
+    assert (canonical_root.parent / image_path).is_file()
     validate_view(view_root, require_images=True)
 
 
@@ -697,10 +1181,41 @@ def test_sharded_source_reference_view_uses_root_assets_and_filename_refs(tmp_pa
 
     shard_path = view_root / "train" / "part-00000.parquet"
     train = pd.read_parquet(shard_path)
-    image_name = _as_list(train.iloc[0]["images_path"])[0]
-    assert Path(image_name).name == image_name
-    assert (view_root / "assets" / image_name).is_file()
-    assert train.iloc[0]["image_path"] == image_name
+    image_path = _as_list(train.iloc[0]["images_path"])[0]
+    assert not Path(image_path).is_absolute()
+    assert (canonical_root.parent / image_path).is_file()
+    assert train.iloc[0]["image_path"] == image_path
+    assert not (view_root / "assets").exists()
+    assert not (view_root / "train" / "assets").exists()
+    validate_view(view_root, require_images=True)
+
+
+def test_sharded_nested_reference_view_uses_nested_images_without_view_assets(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    view_root = tmp_path / "views" / "mineru25_sft_nested_reference_sharded"
+    config = {
+        "name": "mineru25_sft_nested_reference_sharded",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+        "target_serialization": {"text": "plain_text_v1"},
+        "image_policy": {"materialization": {"mode": "nested_reference"}},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+        "shard_policy": {"rows_per_shard": 1},
+    }
+
+    ViewBuilder(canonical_root, view_root).build(config)
+
+    shard_path = view_root / "train" / "part-00000.parquet"
+    train = pd.read_parquet(shard_path)
+    image = _as_list(train.iloc[0]["images"])[0]["image"]
+    assert not Path(image).is_absolute()
+    assert (canonical_root.parent / image).is_file()
+    assert train.iloc[0]["image_path"] == image
+    assert not _as_list(train.iloc[0]["images_bytes"])
+    assert not _as_list(train.iloc[0]["images_path"])
+    assert not (view_root / "assets").exists()
     assert not (view_root / "train" / "assets").exists()
     validate_view(view_root, require_images=True)
 
@@ -709,7 +1224,7 @@ def test_cli_validate_view_resolves_name_from_dataset_root(monkeypatch, tmp_path
     canonical_root = _export_fake_canonical(tmp_path)
     dataset_root = tmp_path / "dataset"
     view_root = dataset_root / "views" / "mineru25_rlvr"
-    monkeypatch.setenv("OCR_DATASET_ROOT", str(dataset_root))
+    monkeypatch.setenv("OCR_DATA_ROOT", str(dataset_root))
     ViewBuilder(canonical_root, view_root).build(
         {
             "name": "mineru25_rlvr",
@@ -727,7 +1242,7 @@ def test_cli_validate_view_resolves_name_from_dataset_root(monkeypatch, tmp_path
 def test_cli_validate_view_absolute_path_does_not_require_dataset_root(monkeypatch, tmp_path):
     canonical_root = _export_fake_canonical(tmp_path)
     view_root = tmp_path / "views" / "absolute_path_view"
-    monkeypatch.delenv("OCR_DATASET_ROOT", raising=False)
+    monkeypatch.delenv("OCR_DATA_ROOT", raising=False)
     ViewBuilder(canonical_root, view_root).build(
         {
             "name": "absolute_path_view",
@@ -740,6 +1255,30 @@ def test_cli_validate_view_absolute_path_does_not_require_dataset_root(monkeypat
     )
 
     docds_main(["validate-view", str(view_root), "--require-images"])
+
+
+def test_cli_validate_view_accepts_worker_controls(monkeypatch, tmp_path, capsys):
+    canonical_root = _export_fake_canonical(tmp_path)
+    dataset_root = tmp_path / "dataset"
+    view_root = dataset_root / "views" / "parallel_validate_view"
+    monkeypatch.setenv("OCR_DATA_ROOT", str(dataset_root))
+    ViewBuilder(canonical_root, view_root).build(
+        {
+            "name": "parallel_validate_view",
+            "stage": "sft",
+            "model_family": "mineru2.5",
+            "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+            "include": [{"task": "text", "sources": ["FakeMinerU"]}],
+            "target_serialization": {"text": "plain_text_v1"},
+            "image_policy": {"materialization": {"mode": "embedded"}},
+            "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+        }
+    )
+
+    docds_main(["validate-view", "parallel_validate_view", "--require-images", "--num-workers", "2", "--worker-batch-size", "1"])
+
+    captured = capsys.readouterr()
+    assert "view ok" in captured.out
 
 
 def test_score_predictions_cli_path(tmp_path):
@@ -852,7 +1391,7 @@ def test_cli_export_source_progress_uses_stderr_and_keeps_stdout_json(monkeypatc
     mineru_root = tmp_path / "mineru"
     source_root = tmp_path / "source"
     canonical_root = tmp_path / "canonical"
-    monkeypatch.setenv("OCR_DATASET_ROOT", str(tmp_path))
+    monkeypatch.setenv("OCR_DATA_ROOT", str(tmp_path))
     _write_fake_mineru_dataset(mineru_root, source_root)
     config_path = tmp_path / "source.yaml"
     config_path.write_text(
@@ -884,3 +1423,44 @@ def test_cli_export_source_progress_uses_stderr_and_keeps_stdout_json(monkeypatc
     assert json.loads(captured.out)["documents"] == 1
     assert "export-source" in captured.err
     assert "canonical/entities/documents/source=FakeMinerU" in captured.err
+
+
+def test_cli_export_source_accepts_parallel_worker_options(monkeypatch, tmp_path, capsys):
+    mineru_root = tmp_path / "mineru"
+    source_root = tmp_path / "source"
+    canonical_root = tmp_path / "canonical"
+    monkeypatch.setenv("OCR_DATA_ROOT", str(tmp_path))
+    _write_fake_mineru_dataset(mineru_root, source_root, sample="paper_001")
+    _write_fake_mineru_dataset(mineru_root, source_root, sample="paper_002")
+    config_path = tmp_path / "source.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "dataset_name": "FakeMinerU",
+                "adapter": "mineru",
+                "mineru_root": str(mineru_root),
+                "source_image_root": str(source_root),
+            }
+        )
+    )
+
+    docds_main(
+        [
+            "export-source",
+            "mineru",
+            "--source-config",
+            str(config_path),
+            "--canonical-root",
+            str(canonical_root),
+            "--num-workers",
+            "2",
+            "--worker-chunksize",
+            "1",
+            "--max-in-flight",
+            "2",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["documents"] == 2
+    validate_canonical(canonical_root, source="FakeMinerU")

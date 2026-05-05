@@ -20,31 +20,45 @@ def test_runtime_images_prefers_embedded_bytes(tmp_path):
     assert images == [{"bytes": b"abc"}]
 
 
-def test_runtime_images_resolves_filename_paths_against_assets_dir(tmp_path):
-    image_file = tmp_path / "asset.png"
+def test_runtime_images_resolves_relative_paths_against_data_root(tmp_path, monkeypatch):
+    image_file = tmp_path / "canonical" / "assets" / "files" / "asset.png"
+    image_file.parent.mkdir(parents=True)
     image_file.write_bytes(b"png")
+    monkeypatch.setenv("OCR_DATA_ROOT", str(tmp_path))
 
-    images = resolve_runtime_images({"images_path": ["asset.png"]}, image_assets_dir=tmp_path)
+    images = resolve_runtime_images({"images_path": ["canonical/assets/files/asset.png"]})
+
+    assert images == [{"image": str(image_file)}]
+
+
+def test_runtime_images_resolves_nested_reference_relative_paths(tmp_path, monkeypatch):
+    image_file = tmp_path / "views" / "view" / "assets" / "asset.png"
+    image_file.parent.mkdir(parents=True)
+    image_file.write_bytes(b"png")
+    monkeypatch.setenv("OCR_DATA_ROOT", str(tmp_path))
+
+    images = resolve_runtime_images({"images": [{"image": "views/view/assets/asset.png"}]})
 
     assert images == [{"image": str(image_file)}]
 
 
 def test_runtime_images_rejects_missing_reference_asset(tmp_path):
     with pytest.raises(FileNotFoundError, match="missing.png"):
-        resolve_runtime_images({"images_path": ["missing.png"]}, image_assets_dir=tmp_path)
+        resolve_runtime_images({"images_path": ["missing.png"]}, data_root=tmp_path)
 
 
-def test_runtime_images_rejects_path_mode_without_assets_dir():
-    with pytest.raises(ValueError, match="image_assets_dir"):
+def test_runtime_images_rejects_path_mode_without_data_root(monkeypatch):
+    monkeypatch.delenv("OCR_DATA_ROOT", raising=False)
+    with pytest.raises(ValueError, match="OCR_DATA_ROOT"):
         resolve_runtime_images({"images_path": ["asset.png"]})
 
 
-def test_runtime_images_rejects_absolute_or_nested_paths(tmp_path):
-    with pytest.raises(ValueError, match="filename"):
-        resolve_runtime_images({"images_path": ["nested/asset.png"]}, image_assets_dir=tmp_path)
+def test_runtime_images_rejects_absolute_or_traversal_paths(tmp_path):
+    with pytest.raises(ValueError, match="relative"):
+        resolve_runtime_images({"images_path": [str(tmp_path / "asset.png")]}, data_root=tmp_path)
 
-    with pytest.raises(ValueError, match="filename"):
-        resolve_runtime_images({"images_path": [str(tmp_path / "asset.png")]}, image_assets_dir=tmp_path)
+    with pytest.raises(ValueError, match="traversal"):
+        resolve_runtime_images({"images_path": ["../asset.png"]}, data_root=tmp_path)
 
 
 def test_ocr_rlhf_dataset_restores_fresh_runtime_images_after_embedded_build(tmp_path):
@@ -53,7 +67,7 @@ def test_ocr_rlhf_dataset_restores_fresh_runtime_images_after_embedded_build(tmp
     dataset.image_key = "runtime_images"
     dataset.video_key = "videos"
     dataset.processor = object()
-    dataset.image_assets_dir = tmp_path
+    dataset.data_root = tmp_path
 
     image = _png_bytes()
     row = {
@@ -73,7 +87,8 @@ def test_ocr_rlhf_dataset_restores_fresh_runtime_images_after_embedded_build(tmp
 
 
 def test_ocr_rlhf_dataset_resolves_reference_assets_for_verl_filter(tmp_path):
-    image_file = tmp_path / "asset.png"
+    image_file = tmp_path / "canonical" / "assets" / "files" / "asset.png"
+    image_file.parent.mkdir(parents=True)
     image_file.write_bytes(_png_bytes())
 
     dataset = object.__new__(OcrRLHFDataset)
@@ -81,10 +96,10 @@ def test_ocr_rlhf_dataset_resolves_reference_assets_for_verl_filter(tmp_path):
     dataset.image_key = "runtime_images"
     dataset.video_key = "videos"
     dataset.processor = object()
-    dataset.image_assets_dir = tmp_path
+    dataset.data_root = tmp_path
     row = {
         "prompt": [{"role": "user", "content": "Read this <image>."}],
-        "images_path": [image_file.name],
+        "images_path": ["canonical/assets/files/asset.png"],
     }
 
     messages = dataset._build_messages(row)
@@ -101,7 +116,7 @@ def test_ocr_sft_dataset_builds_messages_without_mutating_source_columns(tmp_pat
     dataset.video_key = "videos"
     dataset.processor = object()
     dataset.image_patch_size = 14
-    dataset.image_assets_dir = tmp_path
+    dataset.data_root = tmp_path
 
     image = _png_bytes()
     row = {

@@ -15,6 +15,7 @@ from PIL import Image
 
 from tools.data_management.canonical.reader import CanonicalReader
 from tools.data_management.config.resolver import load_processing_config, resolve_path
+from tools.data_management.paths import dataset_relative_path, infer_dataset_root_from_path, resolve_dataset_path
 from tools.data_management.progress import ProgressReporter
 from tools.data_management.prompts import load_prompt_config, resolve_prompt
 from tools.data_management.registry.configured import configured_reward_registry, configured_serializer_registry
@@ -168,7 +169,9 @@ class _SplitParquetWriter:
         shard_index = self.shard_indices[split]
         self.shard_indices[split] += 1
         self.shard_counts[split] += 1
-        return self.temp_dirs[split] / f"part-{shard_index:05d}.parquet"
+        temp_dir = self.temp_dirs[split]
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        return temp_dir / f"part-{shard_index:05d}.parquet"
 
     def asset_dirs(self, split: str) -> tuple[Path, Path]:
         if self.rows_per_shard:
@@ -182,11 +185,21 @@ class ViewBuilder:
         self.canonical_root = Path(canonical_root)
         self.view_root = Path(view_root)
         self.processing_config = processing_config
+        self.dataset_root = self._resolve_dataset_root(processing_config)
         self.canonical_reader = CanonicalReader(self.canonical_root)
         self.serializers = (
             configured_serializer_registry(processing_config) if processing_config else default_serializer_registry()
         )
         self.rewards = configured_reward_registry(processing_config) if processing_config else default_reward_registry()
+
+    def _resolve_dataset_root(self, processing_config: Any | None) -> Path:
+        if processing_config is not None:
+            try:
+                self.canonical_root.resolve().relative_to(processing_config.dataset_root.resolve())
+                return processing_config.dataset_root
+            except ValueError:
+                pass
+        return infer_dataset_root_from_path(self.canonical_root)
 
     @classmethod
     def from_config_path(cls, config_path: str | Path, *, processing_config: str | Path | None = None) -> "ViewBuilder":
@@ -228,8 +241,11 @@ class ViewBuilder:
         records = self._load_selected_records(config)
         records = self._apply_excludes(records, config.get("exclude") or [])
         records = self._apply_samples(records, config.get("sample") or [])
-        split_map = self._assign_splits(records, config.get("split_policy") or {})
         materialize_ctx = self._build_materialize_context(config)
+        records, filter_counts = self._apply_image_filters(records, materialize_ctx, progress=progress)
+        if not records:
+            raise ValueError("view image filters produced no records")
+        split_map = self._assign_splits(records, config.get("split_policy") or {})
         rows_per_shard = _resolve_rows_per_shard(config)
         execution = self._resolve_execution(
             config,
@@ -254,7 +270,7 @@ class ViewBuilder:
                 shutil.rmtree(view_assets_dir)
             except FileNotFoundError:
                 pass
-        if not rows_per_shard or _uses_root_view_assets(materialize_ctx["image_materialization"]):
+        if _uses_root_view_assets(materialize_ctx["image_materialization"]):
             view_assets_dir.mkdir(parents=True, exist_ok=True)
         materialize_ctx["view_assets_dir"] = view_assets_dir
         output_dir = self.view_root
@@ -289,6 +305,10 @@ class ViewBuilder:
             writer.abort()
             raise
         stats = {"split_counts": split_counts, "total_records": sum(split_counts.values())}
+        filtered_records = sum(filter_counts.values())
+        if filtered_records:
+            stats["filtered_records"] = filtered_records
+            stats["filter_counts"] = filter_counts
         if writer.rows_per_shard:
             stats["shard_counts"] = writer.shard_counts
         write_json(output_dir / "stats.json", stats)
@@ -550,6 +570,60 @@ class ViewBuilder:
                 kept.append(record)
         return kept
 
+    def _apply_image_filters(
+        self,
+        records: list[dict[str, Any]],
+        materialize_ctx: dict[str, Any],
+        *,
+        progress: ProgressReporter | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        image_filter = materialize_ctx.get("image_filter") or {}
+        max_aspect_ratio = image_filter.get("max_aspect_ratio")
+        if max_aspect_ratio is None:
+            return records, {}
+
+        asset_manifest = materialize_ctx["asset_manifest"]
+        image_transform_config = materialize_ctx.get("image_transform_config") or {}
+        kept: list[dict[str, Any]] = []
+        counts = {"aspect_ratio": 0, "invalid_dimensions": 0}
+        for record in records:
+            asset = asset_manifest.get(record["image_asset_id"], {})
+            width = _first_positive_dimension(asset.get("width"), (record.get("metadata") or {}).get("width"))
+            height = _first_positive_dimension(asset.get("height"), (record.get("metadata") or {}).get("height"))
+            if width is None or height is None:
+                counts["invalid_dimensions"] += 1
+                continue
+
+            image_transform = _resolve_image_transform(
+                image_transform_config,
+                record["task"],
+                width,
+                height,
+            )
+            effective_width = _first_positive_dimension(image_transform.get("output_width"), width)
+            effective_height = _first_positive_dimension(image_transform.get("output_height"), height)
+            if effective_width is None or effective_height is None:
+                counts["invalid_dimensions"] += 1
+                continue
+
+            aspect_ratio = max(effective_width / effective_height, effective_height / effective_width)
+            if aspect_ratio > max_aspect_ratio:
+                counts["aspect_ratio"] += 1
+                continue
+            kept.append(record)
+
+        if progress:
+            progress.log(
+                "build-view",
+                phase="aspect-filter",
+                input=len(records),
+                kept=len(kept),
+                dropped=sum(counts.values()),
+                max_aspect_ratio=max_aspect_ratio,
+                aspect_ratio=counts["aspect_ratio"],
+                invalid_dimensions=counts["invalid_dimensions"],
+            )
+        return kept, counts
 
     def _apply_samples(self, records: list[dict[str, Any]], samples: list[dict[str, Any]] | dict[str, Any]) -> list[dict[str, Any]]:
         if not samples:
@@ -633,7 +707,9 @@ class ViewBuilder:
             "prompt_config": load_prompt_config(config.get("prompt_profile") or config.get("model_family") or "default"),
             "image_transform_config": config.get("image_transform") or {},
             "image_materialization": _resolve_image_materialization(config),
+            "image_filter": _resolve_image_filter(config),
             "view_name": config.get("name"),
+            "dataset_root": self.dataset_root,
         }
 
     def _materialize(self, record: dict[str, Any], config: dict[str, Any], ctx: dict[str, Any], *, view_name: str, stage: str, split: str) -> dict[str, Any]:
@@ -661,6 +737,7 @@ class ViewBuilder:
         }
         label = serializer.serialize(record, context)
         canonical_image_path = str(asset.get("path") or record["image_asset_id"])
+        resolved_image_path = resolve_dataset_path(canonical_image_path, ctx["dataset_root"])
         content_hash = stable_hash(record["record_id"] + prompt_template_id)
         view_id = stable_id("view", view_name, content_hash)
         view_asset_id = stable_id("view_asset", view_name, task, content_hash)
@@ -668,14 +745,16 @@ class ViewBuilder:
         image_mode = image_materialization["mode"]
         runtime_image_data = None
         runtime_image_transformed = False
-        if not ctx.get("schema_inference"):
-            runtime_image_data = _transform_and_encode(asset.get("path"), image_transform)
+        should_materialize_image_data = image_mode == "embedded" or bool(image_transform)
+        if not ctx.get("schema_inference") and should_materialize_image_data:
+            runtime_image_data = _transform_and_encode(str(resolved_image_path), image_transform)
             runtime_image_transformed = runtime_image_data is not None
             if runtime_image_data is None:
-                runtime_image_data = _read_image_file_bytes(asset.get("path"))
+                runtime_image_data = _read_image_file_bytes(str(resolved_image_path))
         view_image_path = canonical_image_path
-        extension = ".png" if runtime_image_transformed else _image_file_extension(asset.get("path"))
+        extension = ".png" if runtime_image_transformed else _image_file_extension(canonical_image_path)
         image_filename = f"{view_asset_id}{extension}"
+        images_column = None
         images_bytes_column = None
         images_path_column = None
         if image_mode == "embedded":
@@ -686,21 +765,46 @@ class ViewBuilder:
                     raise ValueError(f"embedded view cannot read image bytes for record {record['record_id']}")
             else:
                 images_bytes_column = [runtime_image_data]
-        else:
-            if ctx.get("schema_inference"):
-                view_image_path = image_filename
-                images_path_column = [image_filename]
+        elif image_mode == "source_reference":
+            if image_transform:
+                if ctx.get("schema_inference"):
+                    view_image_path = dataset_relative_path(ctx["view_assets_dir"] / image_filename, ctx["dataset_root"])
+                    images_path_column = [view_image_path]
+                else:
+                    if runtime_image_data is None:
+                        raise ValueError(f"source_reference view cannot transform image for record {record['record_id']}")
+                    view_image_path = _save_view_asset(
+                        runtime_image_data,
+                        view_asset_id,
+                        task,
+                        ctx["view_assets_dir"],
+                        dataset_root=ctx["dataset_root"],
+                        extension=extension,
+                    )
+                    images_path_column = [view_image_path]
             else:
-                if runtime_image_data is None:
-                    raise ValueError(f"source_reference view cannot read image bytes for record {record['record_id']}")
-                view_image_path = _save_view_asset(
-                    runtime_image_data,
-                    view_asset_id,
-                    task,
-                    ctx["view_assets_dir"],
-                    extension=extension,
-                )
+                view_image_path = canonical_image_path
                 images_path_column = [view_image_path]
+        elif image_mode == "nested_reference":
+            if image_transform:
+                if ctx.get("schema_inference"):
+                    view_image_path = dataset_relative_path(ctx["view_assets_dir"] / image_filename, ctx["dataset_root"])
+                else:
+                    if runtime_image_data is None:
+                        raise ValueError(f"nested_reference view cannot transform image for record {record['record_id']}")
+                    view_image_path = _save_view_asset(
+                        runtime_image_data,
+                        view_asset_id,
+                        task,
+                        ctx["view_assets_dir"],
+                        dataset_root=ctx["dataset_root"],
+                        extension=extension,
+                    )
+            else:
+                view_image_path = canonical_image_path
+            images_column = [{"image": view_image_path}]
+        else:
+            raise ValueError(f"unsupported image materialization mode: {image_mode}")
         messages = None
         if stage == "sft":
             messages = [
@@ -725,6 +829,7 @@ class ViewBuilder:
             prompt_template_id=prompt_template_id,
             split=split,  # type: ignore[arg-type]
             view_image_asset_id=view_asset_id,
+            images=images_column,
             images_bytes=images_bytes_column,
             images_path=images_path_column,
             data_source=task,
@@ -762,16 +867,41 @@ def _reward_profile_for_task(config: dict[str, Any], task: str) -> str:
     return by_task.get(task) or config.get("default") or "normalized_levenshtein_v1"
 
 
+def _first_positive_dimension(*values: Any) -> int | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            dimension = int(value)
+        except (TypeError, ValueError):
+            continue
+        if dimension > 0:
+            return dimension
+    return None
+
+
 def _resolve_image_materialization(config: dict[str, Any]) -> dict[str, Any]:
     materialization = ((config.get("image_policy") or {}).get("materialization") or {})
     mode = materialization.get("mode") or "embedded"
-    if mode not in {"embedded", "source_reference"}:
+    if mode not in {"embedded", "source_reference", "nested_reference"}:
         raise ValueError(f"unsupported image materialization mode: {mode}")
     return {"mode": mode}
 
 
+def _resolve_image_filter(config: dict[str, Any]) -> dict[str, float]:
+    image_filter = ((config.get("image_policy") or {}).get("filter") or {})
+    value = image_filter.get("max_aspect_ratio")
+    if value in (None, False, 0, "0"):
+        return {}
+    max_aspect_ratio = float(value)
+    if max_aspect_ratio <= 0:
+        return {}
+    return {"max_aspect_ratio": max_aspect_ratio}
+
+
 def _uses_root_view_assets(image_materialization: dict[str, Any]) -> bool:
-    return image_materialization.get("mode") == "source_reference"
+    del image_materialization
+    return False
 
 
 def _resolve_rows_per_shard(config: dict[str, Any]) -> int | None:
@@ -950,15 +1080,16 @@ def _save_view_asset(
     task: str,
     assets_dir: Path,
     *,
+    dataset_root: Path,
     return_assets_dir: Path | None = None,
     extension: str = ".png",
 ) -> str:
-    """Write image bytes to ``{assets_dir}/{asset_id}{extension}``, returning the filename."""
-    del task
+    """Write image bytes to ``{assets_dir}/{asset_id}{extension}``, returning a dataset-relative path."""
+    del task, return_assets_dir
     assets_dir.mkdir(parents=True, exist_ok=True)
     asset_path = assets_dir / f"{asset_id}{_normalize_extension(extension)}"
     asset_path.write_bytes(image_data)
-    return asset_path.name
+    return dataset_relative_path(asset_path, dataset_root)
 
 
 def _image_file_extension(image_path: str | None) -> str:

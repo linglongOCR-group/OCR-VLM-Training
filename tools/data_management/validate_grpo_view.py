@@ -6,6 +6,8 @@ from typing import Any, Iterable
 
 import pyarrow.parquet as pq
 
+from tools.data_management.paths import dataset_root_from_env, infer_dataset_root_from_path, resolve_dataset_path, validate_relative_path
+
 
 def _as_list(value: Any) -> list[Any]:
     if value is None:
@@ -44,11 +46,24 @@ def _image_placeholders(prompt: Any) -> int:
     return 0
 
 
-def _is_valid_image_filename(image: Any) -> bool:
+def _is_valid_image_reference(image: Any) -> bool:
     if not isinstance(image, str) or not image:
         return False
-    path = Path(image)
-    return not path.is_absolute() and path.name == image
+    try:
+        validate_relative_path(image)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_valid_nested_image(image: Any) -> bool:
+    return isinstance(image, dict) and _is_valid_image_reference(image.get("image"))
+
+
+def _resolve_image_reference(image: str, data_root: Path, assets_dir: Path | None) -> Path:
+    if assets_dir is not None and Path(image).name == image:
+        return assets_dir / image
+    return resolve_dataset_path(image, data_root)
 
 
 def _iter_rows(path: Path, columns: list[str], *, max_rows: int, batch_size: int = 1024):
@@ -86,19 +101,31 @@ def validate_grpo_view(
     image_assets_dir: str | Path | None = None,
 ) -> None:
     for path in _iter_files(paths):
-        assets_dir = Path(image_assets_dir) if image_assets_dir is not None else _default_assets_dir(path)
+        data_root = dataset_root_from_env(required=False) or infer_dataset_root_from_path(_view_root_for_file(path))
+        assets_dir = Path(image_assets_dir) if image_assets_dir is not None else None
+        parquet_file = pq.ParquetFile(path)
+        columns = set(parquet_file.schema_arrow.names)
+        required_columns = ["prompt", "extra_info", "data_source"]
+        missing_columns = [column for column in required_columns if column not in columns]
+        if missing_columns:
+            raise ValueError(f"{path} missing required columns: {missing_columns}")
+        read_columns = required_columns + [
+            column for column in ("images", "images_bytes", "images_path") if column in columns
+        ]
         for row_index, row in _iter_rows(
             path,
-            ["prompt", "images_bytes", "images_path", "extra_info", "data_source"],
+            read_columns,
             max_rows=max_rows_per_file,
         ):
             if not row.get("data_source"):
                 raise ValueError(f"{path}:{row_index} missing data_source in rlvr view")
+            images_nested = _as_list(row.get("images"))
             images_bytes = _as_list(row.get("images_bytes"))
             images_path = _as_list(row.get("images_path"))
-            if images_bytes and images_path:
-                raise ValueError(f"{path}:{row_index} has both images_bytes and images_path")
-            images = images_bytes or images_path
+            carriers = [carrier for carrier in (images_nested, images_bytes, images_path) if carrier]
+            if len(carriers) > 1:
+                raise ValueError(f"{path}:{row_index} has multiple image carriers")
+            images = images_nested or images_bytes or images_path
             placeholders = _image_placeholders(row["prompt"])
             if placeholders != len(images):
                 extra_info = row.get("extra_info") or {}
@@ -112,10 +139,25 @@ def validate_grpo_view(
                 if invalid_bytes:
                     raise ValueError(f"{path}:{row_index} has invalid embedded images")
             elif images_path:
-                invalid_paths = [image for image in images_path if not _is_valid_image_filename(image)]
+                invalid_paths = [image for image in images_path if not _is_valid_image_reference(image)]
                 if invalid_paths:
                     raise ValueError(f"{path}:{row_index} has invalid image path references: {invalid_paths[:1]}")
-                missing = [image for image in images_path if not (assets_dir / str(image)).is_file()]
+                missing = [
+                    image
+                    for image in images_path
+                    if not _resolve_image_reference(str(image), data_root, assets_dir).is_file()
+                ]
+                if missing:
+                    raise ValueError(f"{path}:{row_index} image asset does not exist: {missing[0]}")
+            elif images_nested:
+                invalid_images = [image for image in images_nested if not _is_valid_nested_image(image)]
+                if invalid_images:
+                    raise ValueError(f"{path}:{row_index} has invalid nested image references: {invalid_images[:1]}")
+                missing = [
+                    image["image"]
+                    for image in images_nested
+                    if not _resolve_image_reference(image["image"], data_root, assets_dir).is_file()
+                ]
                 if missing:
                     raise ValueError(f"{path}:{row_index} image asset does not exist: {missing[0]}")
             else:
@@ -126,6 +168,12 @@ def _default_assets_dir(path: Path) -> Path:
     if path.parent.name in {"train", "val", "test"}:
         return path.parent.parent / "assets"
     return path.parent / "assets"
+
+
+def _view_root_for_file(path: Path) -> Path:
+    if path.parent.name in {"train", "val", "test"}:
+        return path.parent.parent
+    return path.parent
 
 
 def main() -> None:

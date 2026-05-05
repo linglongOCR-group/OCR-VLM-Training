@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,6 +13,7 @@ from PIL import Image
 
 from tools.data_management.canonical.writer import CanonicalWriteReport, CanonicalWriter
 from tools.data_management.config.resolver import resolve_path
+from tools.data_management.paths import DATA_ROOT_ENV, dataset_relative_path, infer_dataset_root_from_path
 from tools.data_management.progress import ProgressReporter
 from tools.data_management.schemas import (
     AssetRecord,
@@ -125,7 +127,7 @@ class HybridMessageSourceAdapter(SourceAdapter):
         data = read_yaml(path)
         profile_path = Path(path)
         root = Path(
-            dataset_root or Path(os.environ.get("OCR_DATASET_ROOT", profile_path.parent))
+            dataset_root or Path(os.environ.get(DATA_ROOT_ENV, profile_path.parent))
         )
 
         def resolve_profile_path(value: str | None) -> Path | None:
@@ -171,6 +173,11 @@ class HybridMessageSourceAdapter(SourceAdapter):
     ) -> CanonicalWriteReport:
         selected_tasks = set(tasks or DEFAULT_TASKS)
         canonical_root = Path(canonical_root)
+        if overwrite_partitions:
+            shutil.rmtree(
+                canonical_root / "assets" / "files" / f"source={self.options.dataset_name}",
+                ignore_errors=True,
+            )
         if progress:
             progress.log(
                 "export-source",
@@ -235,7 +242,7 @@ class HybridMessageSourceAdapter(SourceAdapter):
                     record=idx,
                 )
             try:
-                exported = self._export_record(idx, record, selected_tasks)
+                exported = self._export_record(idx, record, selected_tasks, canonical_root)
             except Exception as exc:
                 report.errors.append(
                     {"record_index": str(idx), "error": str(exc)}
@@ -308,7 +315,7 @@ class HybridMessageSourceAdapter(SourceAdapter):
             return json.load(f)
 
     def _export_record(
-        self, idx: int, record: dict[str, Any], selected_tasks: set[str]
+        self, idx: int, record: dict[str, Any], selected_tasks: set[str], canonical_root: Path
     ) -> dict[str, Any]:
         messages = record.get("messages", [])
         images = record.get("images", [])
@@ -318,7 +325,9 @@ class HybridMessageSourceAdapter(SourceAdapter):
         if not images:
             raise ValueError(f"record {idx}: no image path")
 
-        image_path = images[0]
+        image_path = str(images[0])
+        source_image_path = Path(image_path)
+        dataset_root = infer_dataset_root_from_path(canonical_root)
         user_content = messages[0].get("content", "")
         assistant_content = messages[1].get("content", "")
 
@@ -339,14 +348,26 @@ class HybridMessageSourceAdapter(SourceAdapter):
         page_asset_id = stable_id(
             "asset", "page_render", self.options.dataset_name, doc_hash, "0000"
         )
+        crop_asset_id = stable_id("asset", "region_crop", self.options.dataset_name, doc_hash, "0000")
         image_format = Path(image_path).suffix.lstrip(".") or "unknown"
+        crop_path, crop_width, crop_height, crop_format = _copy_region_image(
+            source_image_path,
+            dataset_root=dataset_root,
+            source_name=self.options.dataset_name,
+            asset_id=crop_asset_id,
+            extension=image_format,
+        )
+        try:
+            page_image_path = dataset_relative_path(source_image_path, dataset_root) if source_image_path.is_absolute() else image_path
+        except ValueError:
+            page_image_path = crop_path
 
         # Document
         document = CanonicalDocument(
             document_id=doc_id,
             source_name=self.options.dataset_name,
             source_document_id=f"record_{idx:06d}",
-            document_path=image_path,
+            document_path=page_image_path,
             document_type="image",
             num_pages=1,
             metadata={"record_index": idx, "task": task},
@@ -374,12 +395,29 @@ class HybridMessageSourceAdapter(SourceAdapter):
             page_id=page_id,
             region_id=None,
             task=task,
-            path=image_path,
+            path=page_image_path,
             width=width,
             height=height,
             format=image_format,
             coordinate_space="canonical_page_pixel_xyxy",
             transform={"source": "hybrid_message"},
+        )
+
+        crop_asset = AssetRecord(
+            asset_id=crop_asset_id,
+            asset_type="region_crop",
+            source_name=self.options.dataset_name,
+            document_id=doc_id,
+            page_id=page_id,
+            region_id=region_id,
+            task=task,
+            path=crop_path,
+            width=crop_width,
+            height=crop_height,
+            format=crop_format,
+            parent_asset_id=page_asset_id,
+            transform_spec_hash=stable_hash({"operation": "copy", "source": image_path}),
+            transform={"operation": "copy", "source": "hybrid_message_image"},
         )
 
         # Region (whole image for non-layout, or sentinel for layout)
@@ -394,7 +432,7 @@ class HybridMessageSourceAdapter(SourceAdapter):
             element_type=task,
             category=task,
             reading_order=1,
-            crop_asset_id=None,
+            crop_asset_id=crop_asset_id,
             metadata={"record_index": idx},
         )
 
@@ -407,18 +445,18 @@ class HybridMessageSourceAdapter(SourceAdapter):
             document_id=doc_id,
             page_id=page_id,
             region_id=region_id,
-            image_asset_id=page_asset_id,
+            image_asset_id=crop_asset_id,
             target=target,
             category=task,
             provenance={"record_index": idx, "source_file": str(self.options.data_file)},
-            metadata={"width": width, "height": height},
+            metadata={"width": crop_width, "height": crop_height, "uses_page_image": False},
         )
 
         return {
             "documents": [document],
             "pages": [page],
             "regions": [region],
-            "assets": [page_asset],
+            "assets": [page_asset, crop_asset],
             "task_records": {task: [task_record]},
         }
 
@@ -479,6 +517,51 @@ def _parse_layout_target(
         "coordinate_space": "canonical_page_pixel_xyxy",
         "elements": elements,
     }
+
+
+def _copy_region_image(
+    source_image_path: Path,
+    *,
+    dataset_root: Path,
+    source_name: str,
+    asset_id: str,
+    extension: str,
+) -> tuple[str, int, int, str]:
+    if not source_image_path.is_file():
+        raise FileNotFoundError(f"source image does not exist: {source_image_path}")
+    normalized_extension = _normalize_extension(extension)
+    safe_asset_id = asset_id.replace(":", "_").replace("/", "_")
+    relative_path = (
+        Path("canonical")
+        / "assets"
+        / "files"
+        / f"source={source_name}"
+        / "region_crop"
+        / safe_asset_id[:2]
+        / f"{safe_asset_id}{normalized_extension}"
+    )
+    output_path = dataset_root / relative_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_image_path, output_path)
+    width, height = _copied_image_dimensions(output_path)
+    return relative_path.as_posix(), width, height, normalized_extension.lstrip(".")
+
+
+def _normalize_extension(extension: str | None) -> str:
+    if not extension:
+        return ".jpg"
+    extension = extension.lower()
+    if not extension.startswith("."):
+        extension = f".{extension}"
+    return extension
+
+
+def _copied_image_dimensions(path: Path) -> tuple[int, int]:
+    try:
+        with Image.open(path) as image:
+            return image.size
+    except Exception:
+        return 1, 1
 
 
 class _ShardWriter:

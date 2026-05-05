@@ -331,7 +331,7 @@ canonical_image_policy:
   page_render:
     enabled: true
     dpi: 200
-    format: png
+    format: jpg
     color_mode: rgb
     background: white
     apply_pdf_rotation: true
@@ -350,7 +350,7 @@ canonical_image_policy:
       value: 0.03
       max_pixels: 32
     clip_to_page: true
-    format: png
+    format: jpg
 
   coordinate_policy:
     canonical_bbox_space: page_pixel_xyxy
@@ -974,11 +974,14 @@ Supported materialization modes:
 | Mode               | Meaning                                                                                     |
 | ------------------ | ------------------------------------------------------------------------------------------- |
 | `embedded`         | Store runtime images in Parquet as flat `images_bytes: list<binary>`                        |
-| `source_reference` | Copy or transform selected images into `views/<view>/assets/` and reference filenames only  |
+| `source_reference` | Reference dataset-root-relative image paths in `images_path` |
+| `nested_reference` | Reference dataset-root-relative image paths in VERL-native `images` dicts |
 
 `embedded` is the default for portable VERL views. `image_path` remains a lineage/debug field and must not be required by the training runtime in embedded mode.
 
-For `source_reference`, the view builder still reads from the canonical asset path, but the runtime values written to `images_path` are filenames only. The files themselves are materialized under `views/<view>/assets/`. If an image transform is configured, the transformed PNG is written; otherwise the original image bytes are copied with their original extension.
+For `source_reference`, identity images keep the canonical or source asset path relative to `OCR_DATA_ROOT`. If an image transform is configured, the transformed PNG is written under `views/<view>/assets/`, and `images_path` stores that dataset-root-relative path.
+
+For `nested_reference`, rows use the original VERL nested image shape with the same dataset-root-relative path policy: `images: [{"image": "canonical/assets/files/...jpg"}]` for identity images or `images: [{"image": "views/<view>/assets/...png"}]` for transformed images.
 
 Large embedded-byte views should use explicit sharding:
 
@@ -1000,7 +1003,7 @@ conversion errors.
 | ---------------------- | ---------------------- | ------------------------ |
 | Source                 | Raw images/PDFs        | Original                 |
 | Canonical              | Rendered pages         | PNG                      |
-| Canonical              | Region crops           | PNG                      |
+| Canonical              | Region crops           | High-quality JPEG        |
 | View                   | Embedded runtime image bytes | PNG or high-quality WebP |
 | View                   | Source-reference training images | PNG or high-quality WebP |
 
@@ -1011,14 +1014,14 @@ canonical_image_policy:
   page_render:
     format: png
   region_crop:
-    format: png
+    format: jpg
 
 view_image_policy:
   materialization:
     mode: embedded
 ```
 
-For OCR, table, formula, and diagram tasks, avoid low-quality JPEG by default.
+For OCR, table, formula, and diagram tasks, avoid low-quality JPEG settings by default.
 
 ---
 
@@ -1273,8 +1276,9 @@ Recommended columns:
 | `id`                       | string      |      Yes | Unique view record ID               |
 | `task`                     | string      |      Yes | Task name                           |
 | `image_path`               | string      |      Yes | Lineage/debug image path            |
+| `images`                   | list<dict>  | Optional | VERL-native nested image references |
 | `images_bytes`             | list<binary>| Optional | Embedded runtime image bytes        |
-| `images_path`              | list<string>| Optional | Source-reference asset filenames    |
+| `images_path`              | list<string>| Optional | Dataset-root-relative image paths   |
 | `messages`                 | list/null   | Optional | VERL SFT conversation               |
 | `prompt`                   | string      |      Yes | Model input prompt                  |
 | `label`                    | string      |      Yes | Target output string                |
@@ -1297,6 +1301,7 @@ Example:
   "id": "view:mineru25_sft_v1:000001",
   "task": "table",
   "image_path": "canonical/assets/regions/source=DocBank/doc/page_region.png",
+  "images": null,
   "images_bytes": ["<binary PNG or WebP bytes>"],
   "images_path": null,
   "prompt": "<image>\nTable Recognition:",
@@ -1809,7 +1814,7 @@ canonical:
 
   image:
     page_render_format: png
-    crop_format: png
+    crop_format: jpg
     page_render_dpi: 200
     crop_margin_relative: 0.03
     crop_margin_max_pixels: 32
