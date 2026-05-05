@@ -1,0 +1,38 @@
+name: mineru25_trim_pretrain_v2_nested_reference
+description: "SFT pretraining view — DocBank_500K + UniRec_990K text/table/formula records; excludes layout tasks; Verl nested image references"
+stage: sft
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/mineru25_trim_pretrain_v2_nested_reference
+
+include:
+  - task: text
+    sources: [DocBank_500K, UniRec_990K]
+  - task: table
+    sources: [DocBank_500K]
+  - task: formula
+    sources: [DocBank_500K]
+
+target_serialization:
+  table: enhanced_otsl_v1
+  formula: latex_plain_v1
+  text: plain_text_v1
+
+image_policy:
+  materialization:
+    mode: nested_reference
+  filter:
+    max_aspect_ratio: 180
+
+shard_policy:
+  rows_per_shard: 10000
+
+split_policy:
+  level: document
+  seed: 42
+  train_ratio: 1.0
+  val_ratio: 0.0
+  test_ratio: 0.0

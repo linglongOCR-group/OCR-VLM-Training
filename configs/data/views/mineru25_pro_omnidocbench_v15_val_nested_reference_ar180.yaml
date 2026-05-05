@@ -1,0 +1,38 @@
+name: mineru25_pro_omnidocbench_v15_val_nested_reference_ar180
+description: "Validation-only SFT view - MinerU2.5_Pro_OmniDocBench_v1.5 text/table/formula records, excludes layout, nested image references, aspect ratio <= 180"
+stage: sft
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/mineru25_pro_omnidocbench_v15_val_nested_reference_ar180
+
+include:
+  - task: text
+    sources: [MinerU2.5_Pro_OmniDocBench_v1.5]
+  - task: table
+    sources: [MinerU2.5_Pro_OmniDocBench_v1.5]
+  - task: formula
+    sources: [MinerU2.5_Pro_OmniDocBench_v1.5]
+
+target_serialization:
+  text: plain_text_v1
+  table: enhanced_otsl_v1
+  formula: latex_plain_v1
+
+image_policy:
+  materialization:
+    mode: nested_reference
+  filter:
+    max_aspect_ratio: 180
+
+shard_policy:
+  rows_per_shard: 10000
+
+split_policy:
+  level: document
+  seed: 42
+  train_ratio: 0.0
+  val_ratio: 1.0
+  test_ratio: 0.0

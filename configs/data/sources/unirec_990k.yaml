@@ -1,0 +1,43 @@
+dataset_name: UniRec_990K
+description: >-
+  UniRec 990K — pure text recognition dataset with ~991K pre-built message-format
+  records. Each record is a user/assistant pair with "<image>\nText Recognition:"
+  prompt and plain-text Chinese/English ground truth. Built from UniRec_40M raw data.
+
+source_path: sources/UniRec_990K
+canonical_output: canonical
+
+original_source:
+  location: /mnt/sas-server-0/Pretraining/datasets/unirec_990k.json
+  images_root: /mnt/sas-server-0/RawData/UniRec_40M
+
+license: null
+
+dataset_scale:
+  total_records: 991879
+  text: 991879
+
+adapter: hybrid_message
+annotation_format: Pre-built message format (plain text labels)
+image_extensions:
+  - .png
+  - .jpg
+  - .jpeg
+
+supported_tasks:
+  - text
+
+export_tasks:
+  - text
+
+processing:
+  owner: Boyu Hou
+  date: "2026-04-30"
+  known_issues:
+    - "Images use absolute paths on /mnt/sas-server-0/RawData/UniRec_40M/"
+    - "Text-only dataset — no layout/table/formula tasks"
+  export_notes: []
+
+shard_size: 5000
+allow_unreadable_images: true
+skip_errors: false
