@@ -8,6 +8,7 @@ registries:
   source_adapters:
     hybrid_message: tools.data_management.sources.adapters.hybrid_message.HybridMessageSourceAdapter
     mineru: tools.data_management.sources.adapters.mineru.MinerUSourceAdapter
+    pubtable: tools.data_management.sources.adapters.pubtable.PubTableSourceAdapter
   serializers:
     mineru_layout_box_v1: tools.data_management.serializers.layout_mineru.MinerULayoutSerializer
     enhanced_otsl_v1: tools.data_management.serializers.table_otsl.EnhancedOTSLSerializer

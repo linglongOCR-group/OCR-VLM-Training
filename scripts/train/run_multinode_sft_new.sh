@@ -304,4 +304,6 @@ torchrun \
   trainer.device=npu \
   trainer.nnodes="${NNODES}" \
   trainer.n_gpus_per_node="${NPUS_PER_NODE}" \
+  +trainer.validate_only="${VALIDATE_ONLY:-False}" \
+  +trainer.val_before_train="${VAL_BEFORE_TRAIN:-False}" \
   "$@"

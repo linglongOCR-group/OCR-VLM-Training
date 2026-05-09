@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import yaml
 from PIL import Image
@@ -17,6 +18,7 @@ from tools.data_management.prompts import load_prompt_config, resolve_prompt
 from tools.data_management.serializers.layout_mineru import MinerULayoutSerializer
 from tools.data_management.sources.adapters.hybrid_message import HybridMessageExportOptions, HybridMessageSourceAdapter
 from tools.data_management.sources.adapters.mineru import MinerUExportOptions, MinerUSourceAdapter
+from tools.data_management.sources.adapters.pubtable import PubTableExportOptions, PubTableSourceAdapter
 from tools.data_management.validate_grpo_view import validate_grpo_view
 from tools.data_management.views import ViewBuilder, reward_smoke_test, score_predictions, validate_view
 from tools.data_management.views.builder import _SplitParquetWriter
@@ -105,6 +107,23 @@ def _write_fake_mineru_dataset(root: Path, source_root: Path, sample: str = "pap
     (vlm_dir / f"{sample}_middle.json").write_text(json.dumps(middle))
     (vlm_dir / f"{sample}_content_list_v2.json").write_text(json.dumps(content_v2))
     (vlm_dir / f"{sample}.md").write_text("# A Title\n")
+
+
+def _write_fake_pubtable_dataset(root: Path, samples: list[tuple[str, int, int]]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "filename": [filename for filename, _, _ in samples],
+            "image": pa.array(
+                [{"bytes": _minimal_png(width, height), "path": filename} for filename, width, height in samples],
+                type=pa.struct([("bytes", pa.binary()), ("path", pa.string())]),
+            ),
+            "otsl": [["<table>", "</table>"] for _ in samples],
+            "cols": [999 for _ in samples],
+            "rows": [888 for _ in samples],
+        }
+    )
+    pq.write_table(table, root / "part-00000.parquet")
 
 
 def _export_fake_canonical(tmp_path: Path) -> Path:
@@ -207,6 +226,91 @@ def test_mineru_parallel_export_matches_serial_output(tmp_path):
         assert normalize_temp_root(parallel_frame.to_dict(orient="records"), parallel_dataset_root) == normalize_temp_root(
             serial_frame.to_dict(orient="records"),
             serial_dataset_root,
+        )
+
+
+def test_pubtable_export_materializes_embedded_images_with_dataset_relative_paths(tmp_path):
+    data_dir = tmp_path / "sources" / "pubtable" / "data"
+    _write_fake_pubtable_dataset(data_dir, [("PMC2147049_table_0.jpg", 37, 19)])
+    canonical_root = tmp_path / "canonical"
+
+    report = PubTableSourceAdapter(
+        PubTableExportOptions(data_dir=data_dir, dataset_name="PubTableFake")
+    ).export(canonical_root)
+
+    assert report.documents == 1
+    assert report.pages == 1
+    assert report.regions == 1
+    assert report.assets == 2
+    assets = pd.read_parquet(canonical_root / "assets/manifests/source=PubTableFake/part-00000.parquet")
+    pages = pd.read_parquet(canonical_root / "entities/pages/source=PubTableFake/part-00000.parquet")
+    regions = pd.read_parquet(canonical_root / "entities/regions/source=PubTableFake/part-00000.parquet")
+
+    expected_path = "canonical/assets/files/source=PubTableFake/PMC2147049_table_0.jpg"
+    assert set(assets["path"]) == {expected_path}
+    assert (tmp_path / expected_path).is_file()
+    assert _decode_png((tmp_path / expected_path).read_bytes()).size == (37, 19)
+    assert set(assets["width"]) == {37}
+    assert set(assets["height"]) == {19}
+    assert pages.iloc[0]["width"] == 37
+    assert pages.iloc[0]["height"] == 19
+    assert list(regions.iloc[0]["bbox"]) == [0, 0, 37, 19]
+
+
+def test_pubtable_parallel_export_matches_serial_output(tmp_path):
+    samples = [("table_001.jpg", 31, 17), ("table_002.jpg", 29, 13), ("table_003.jpg", 23, 11)]
+    serial_data_dir = tmp_path / "serial" / "sources" / "pubtable" / "data"
+    parallel_data_dir = tmp_path / "parallel" / "sources" / "pubtable" / "data"
+    _write_fake_pubtable_dataset(serial_data_dir, samples)
+    _write_fake_pubtable_dataset(parallel_data_dir, samples)
+
+    serial_root = tmp_path / "serial" / "canonical"
+    parallel_root = tmp_path / "parallel" / "canonical"
+    base_options = {"dataset_name": "PubTableFake", "shard_size": 2}
+    serial_report = PubTableSourceAdapter(
+        PubTableExportOptions(**base_options, data_dir=serial_data_dir)
+    ).export(serial_root)
+    parallel_report = PubTableSourceAdapter(
+        PubTableExportOptions(
+            **base_options,
+            data_dir=parallel_data_dir,
+            num_workers=2,
+            worker_chunksize=1,
+        )
+    ).export(parallel_root)
+
+    assert parallel_report.to_dict() == serial_report.to_dict()
+    validate_canonical(parallel_root, source="PubTableFake")
+
+    def normalize_value(value):
+        if hasattr(value, "tolist"):
+            return normalize_value(value.tolist())
+        if isinstance(value, dict):
+            return {key: normalize_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize_value(item) for item in value]
+        return value
+
+    for relative in [
+        "entities/documents/source=PubTableFake",
+        "entities/pages/source=PubTableFake",
+        "entities/regions/source=PubTableFake",
+        "assets/manifests/source=PubTableFake",
+        "records/table/source=PubTableFake",
+    ]:
+        serial_frame = pd.concat(pd.read_parquet(path) for path in sorted((serial_root / relative).glob("part-*.parquet")))
+        parallel_frame = pd.concat(
+            pd.read_parquet(path) for path in sorted((parallel_root / relative).glob("part-*.parquet"))
+        )
+        sort_column = next(
+            column
+            for column in ("document_id", "page_id", "region_id", "asset_id", "record_id")
+            if column in serial_frame.columns
+        )
+        serial_frame = serial_frame.sort_values(sort_column).reset_index(drop=True)
+        parallel_frame = parallel_frame.sort_values(sort_column).reset_index(drop=True)
+        assert normalize_value(parallel_frame.to_dict(orient="records")) == normalize_value(
+            serial_frame.to_dict(orient="records")
         )
 
 
