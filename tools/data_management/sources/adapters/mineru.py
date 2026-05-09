@@ -335,7 +335,7 @@ class MinerUSourceAdapter(SourceAdapter):
                 yield _export_sample_for_worker(self.options, tuple(sorted(selected_tasks)), canonical_root, sample)
             return
 
-        max_in_flight = self.options.max_in_flight or self.options.num_workers * 4
+        max_in_flight = self.options.max_in_flight if self.options.max_in_flight is not None else self.options.num_workers * 4
         max_in_flight = max(max_in_flight, self.options.num_workers)
         task_tuple = tuple(sorted(selected_tasks))
         with ProcessPoolExecutor(max_workers=self.options.num_workers) as pool:

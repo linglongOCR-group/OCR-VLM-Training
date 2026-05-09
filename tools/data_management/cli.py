@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> None:
         progress = _make_progress(args, root=Path(canonical_root).parent)
         overwrite_partitions = args.overwrite_partitions
         if overwrite_partitions is None:
-            overwrite_partitions = not adapter.options.skip_completed
+            overwrite_partitions = not getattr(adapter.options, "skip_completed", False)
         report = adapter.export(
             canonical_root,
             tasks=tasks,
