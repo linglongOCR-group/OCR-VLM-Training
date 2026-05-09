@@ -398,52 +398,54 @@ class MinerUSourceAdapter(SourceAdapter):
         task_records: dict[str, list[CanonicalTaskRecord]] = {task: [] for task in selected_tasks}
         assets: list[AssetRecord] = []
 
-        for page_index, page_blocks in enumerate(model_pages):
-            if not isinstance(page_blocks, list):
-                continue
-            middle_page = middle_pages[page_index] if page_index < len(middle_pages) else None
-            width, height = _page_size(middle_page)
-            page_id = stable_id("page", self.options.dataset_name, document_hash, f"{page_index:04d}")
-            page_asset_id = stable_id("asset", "page_render", self.options.dataset_name, document_hash, f"{page_index:04d}")
-            page_source_id = sample.sample_id if len(model_pages) == 1 else f"{sample.sample_id}_p{page_index:04d}"
-            page_asset = AssetRecord(
-                asset_id=page_asset_id,
-                asset_type="page_render",
-                source_name=self.options.dataset_name,
-                document_id=document_id,
-                page_id=page_id,
-                region_id=None,
-                task="layout",
-                path=source_image_relpath,
-                width=width,
-                height=height,
-                format=Path(image_path).suffix.lstrip(".") or "unknown",
-                coordinate_space="canonical_page_pixel_xyxy",
-            )
-            assets.append(page_asset)
-            pages.append(
-                CanonicalPage(
-                    page_id=page_id,
-                    document_id=document_id,
+        with _RegionCropSaver(
+            source_image_path,
+            page_width=0,
+            page_height=0,
+            dataset_root=dataset_root,
+            source_name=self.options.dataset_name,
+        ) as crop_saver:
+            for page_index, page_blocks in enumerate(model_pages):
+                if not isinstance(page_blocks, list):
+                    continue
+                middle_page = middle_pages[page_index] if page_index < len(middle_pages) else None
+                width, height = _page_size(middle_page)
+                crop_saver.page_width = width
+                crop_saver.page_height = height
+                page_id = stable_id("page", self.options.dataset_name, document_hash, f"{page_index:04d}")
+                page_asset_id = stable_id("asset", "page_render", self.options.dataset_name, document_hash, f"{page_index:04d}")
+                page_source_id = sample.sample_id if len(model_pages) == 1 else f"{sample.sample_id}_p{page_index:04d}"
+                page_asset = AssetRecord(
+                    asset_id=page_asset_id,
+                    asset_type="page_render",
                     source_name=self.options.dataset_name,
-                    source_page_id=page_source_id,
-                    page_index=page_index,
-                    page_image_asset_id=page_asset_id,
+                    document_id=document_id,
+                    page_id=page_id,
+                    region_id=None,
+                    task="layout",
+                    path=source_image_relpath,
                     width=width,
                     height=height,
-                    attributes={"mineru_subdir": self.options.mineru_subdir},
+                    format=Path(image_path).suffix.lstrip(".") or "unknown",
+                    coordinate_space="canonical_page_pixel_xyxy",
                 )
-            )
+                assets.append(page_asset)
+                pages.append(
+                    CanonicalPage(
+                        page_id=page_id,
+                        document_id=document_id,
+                        source_name=self.options.dataset_name,
+                        source_page_id=page_source_id,
+                        page_index=page_index,
+                        page_image_asset_id=page_asset_id,
+                        width=width,
+                        height=height,
+                        attributes={"mineru_subdir": self.options.mineru_subdir},
+                    )
+                )
 
-            middle_bboxes = _middle_bbox_by_index(middle_page)
-            layout_elements: list[dict[str, Any]] = []
-            with _RegionCropSaver(
-                source_image_path,
-                page_width=width,
-                page_height=height,
-                dataset_root=dataset_root,
-                source_name=self.options.dataset_name,
-            ) as crop_saver:
+                middle_bboxes = _middle_bbox_by_index(middle_page)
+                layout_elements: list[dict[str, Any]] = []
                 for reading_order, block in enumerate((item for item in page_blocks if isinstance(item, dict)), start=1):
                     block_type = str(block.get("type") or "unknown")
                     bbox = _block_bbox(block, middle_bboxes, width, height)
@@ -516,21 +518,21 @@ class MinerUSourceAdapter(SourceAdapter):
                                     metadata={"width": crop_width, "height": crop_height, "uses_page_image": False},
                                 )
                             )
-            if "layout" in selected_tasks and layout_elements:
-                task_records["layout"].append(
-                    CanonicalTaskRecord(
-                        record_id=stable_id("layout", self.options.dataset_name, page_id),
-                        task="layout",
-                        source_name=self.options.dataset_name,
-                        document_id=document_id,
-                        page_id=page_id,
-                        region_id=None,
-                        image_asset_id=page_asset_id,
-                        target={"coordinate_space": "canonical_page_pixel_xyxy", "elements": layout_elements},
-                        provenance={"mineru_dir": str(sample.annot_dir)},
-                        metadata={"width": width, "height": height},
+                if "layout" in selected_tasks and layout_elements:
+                    task_records["layout"].append(
+                        CanonicalTaskRecord(
+                            record_id=stable_id("layout", self.options.dataset_name, page_id),
+                            task="layout",
+                            source_name=self.options.dataset_name,
+                            document_id=document_id,
+                            page_id=page_id,
+                            region_id=None,
+                            image_asset_id=page_asset_id,
+                            target={"coordinate_space": "canonical_page_pixel_xyxy", "elements": layout_elements},
+                            provenance={"mineru_dir": str(sample.annot_dir)},
+                            metadata={"width": width, "height": height},
+                        )
                     )
-                )
 
         return {"documents": [document], "pages": pages, "regions": regions, "task_records": task_records, "assets": assets}
 
