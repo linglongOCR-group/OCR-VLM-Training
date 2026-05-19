@@ -119,6 +119,10 @@ def _write_fake_pubtable_dataset(root: Path, samples: list[tuple[str, int, int]]
                 type=pa.struct([("bytes", pa.binary()), ("path", pa.string())]),
             ),
             "otsl": [["<table>", "</table>"] for _ in samples],
+            "html_with_text": [
+                ["<tr>", "<td>", filename, "</td>", "</tr>"]
+                for filename, _, _ in samples
+            ],
             "cols": [999 for _ in samples],
             "rows": [888 for _ in samples],
         }
@@ -245,6 +249,7 @@ def test_pubtable_export_materializes_embedded_images_with_dataset_relative_path
     assets = pd.read_parquet(canonical_root / "assets/manifests/source=PubTableFake/part-00000.parquet")
     pages = pd.read_parquet(canonical_root / "entities/pages/source=PubTableFake/part-00000.parquet")
     regions = pd.read_parquet(canonical_root / "entities/regions/source=PubTableFake/part-00000.parquet")
+    table = pd.read_parquet(canonical_root / "records/table/source=PubTableFake/part-00000.parquet").iloc[0]
 
     expected_path = "canonical/assets/files/source=PubTableFake/PMC2147049_table_0.jpg"
     assert set(assets["path"]) == {expected_path}
@@ -255,6 +260,9 @@ def test_pubtable_export_materializes_embedded_images_with_dataset_relative_path
     assert pages.iloc[0]["width"] == 37
     assert pages.iloc[0]["height"] == 19
     assert list(regions.iloc[0]["bbox"]) == [0, 0, 37, 19]
+    assert table["target"] == {
+        "html": "<table><tr><td>PMC2147049_table_0.jpg</td></tr></table>"
+    }
 
 
 def test_pubtable_parallel_export_matches_serial_output(tmp_path):
@@ -417,6 +425,98 @@ def test_hybrid_message_adapter_copies_text_images_to_canonical_region_crops(tmp
     assert text["image_asset_id"] == crop_asset["asset_id"]
     assert text["metadata"]["uses_page_image"] is False
     assert regions.iloc[0]["crop_asset_id"] == crop_asset["asset_id"]
+
+
+def test_hybrid_message_from_profile_uses_declared_data_file_and_mirrored_image_root(tmp_path):
+    dataset_root = tmp_path
+    source_root = dataset_root / "sources" / "HaoY-Syn-Formula"
+    mirrored_image = source_root / "images" / "formula_001.png"
+    mirrored_image.parent.mkdir(parents=True)
+    mirrored_image.write_bytes(_minimal_png(48, 16))
+    data_file = source_root / "1022340.json"
+    data_file.write_text(
+        json.dumps(
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "<image>Formula Recognition"},
+                        {"role": "assistant", "content": r"x^2 + y^2 = z^2"},
+                    ],
+                    "images": ["/old/mount/Formula/images/formula_001.png"],
+                }
+            ]
+        )
+    )
+    profile = tmp_path / "haoy_formula.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "dataset_name: HaoY-Syn-Formula",
+                "source_path: sources/HaoY-Syn-Formula",
+                "source_image_root: sources/HaoY-Syn-Formula/images",
+                "data_file: 1022340.json",
+                "adapter: hybrid_message",
+                "export_tasks: [formula]",
+            ]
+        )
+    )
+    canonical_root = dataset_root / "canonical"
+
+    adapter = HybridMessageSourceAdapter.from_profile(profile, dataset_root=dataset_root)
+    report = adapter.export(canonical_root, tasks=["formula"])
+
+    assert report.task_records == {"formula": 1}
+    formula = pd.read_parquet(canonical_root / "records/formula/source=HaoY-Syn-Formula/part-00000.parquet").iloc[0]
+    assets = pd.read_parquet(canonical_root / "assets/manifests/source=HaoY-Syn-Formula/part-00000.parquet")
+    crop_asset = assets[assets["asset_type"] == "region_crop"].iloc[0]
+    assert formula["target"]["latex"] == r"x^2 + y^2 = z^2"
+    assert (dataset_root / crop_asset["path"]).is_file()
+    assert _decode_png((dataset_root / crop_asset["path"]).read_bytes()).size == (48, 16)
+
+
+def test_hybrid_message_source_reference_image_materialization_reuses_source_images(tmp_path):
+    dataset_root = tmp_path
+    source_root = dataset_root / "sources" / "HaoY-Syn-Formula"
+    source_image = source_root / "images" / "formula_001.png"
+    source_image.parent.mkdir(parents=True)
+    source_image.write_bytes(_minimal_png(48, 16))
+    data_file = source_root / "1022340.json"
+    data_file.write_text(
+        json.dumps(
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "<image>Formula Recognition"},
+                        {"role": "assistant", "content": r"x^2 + y^2 = z^2"},
+                    ],
+                    "images": [str(source_image)],
+                }
+            ]
+        )
+    )
+    profile = tmp_path / "haoy_formula.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "dataset_name: HaoY-Syn-Formula",
+                "source_path: sources/HaoY-Syn-Formula",
+                "source_image_root: sources/HaoY-Syn-Formula/images",
+                "data_file: 1022340.json",
+                "image_materialization: source_reference",
+                "adapter: hybrid_message",
+                "export_tasks: [formula]",
+            ]
+        )
+    )
+    canonical_root = dataset_root / "canonical"
+
+    adapter = HybridMessageSourceAdapter.from_profile(profile, dataset_root=dataset_root)
+    adapter.export(canonical_root, tasks=["formula"])
+
+    assets = pd.read_parquet(canonical_root / "assets/manifests/source=HaoY-Syn-Formula/part-00000.parquet")
+    crop_asset = assets[assets["asset_type"] == "region_crop"].iloc[0]
+    assert crop_asset["path"] == "sources/HaoY-Syn-Formula/images/formula_001.png"
+    assert not (canonical_root / "assets" / "files" / "source=HaoY-Syn-Formula").exists()
 
 
 def test_mineru_adapter_writes_spec_partitions(tmp_path):
@@ -1264,6 +1364,42 @@ def test_view_builder_shards_split_outputs(tmp_path):
     assert [len(pd.read_parquet(path)) for path in shard_paths] == [2, 2]
     assert [len(pd.read_parquet(path, dtype_backend="pyarrow")) for path in shard_paths] == [2, 2]
     validate_view(view_root, require_images=True)
+
+
+def test_view_builder_drops_empty_label_records(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    formula_path = canonical_root / "records/formula/source=FakeMinerU/part-00000.parquet"
+    formulas = pd.read_parquet(formula_path)
+    formulas.at[0, "target"] = {"latex": ""}
+    formulas.to_parquet(formula_path, index=False)
+    table_path = canonical_root / "records/table/source=FakeMinerU/part-00000.parquet"
+    tables = pd.read_parquet(table_path)
+    tables.at[0, "target"] = {"html": "<table></table>"}
+    tables.to_parquet(table_path, index=False)
+    view_root = tmp_path / "views" / "empty_label_filter"
+    config = {
+        "name": "empty_label_filter",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [
+            {"task": "formula", "sources": ["FakeMinerU"]},
+            {"task": "table", "sources": ["FakeMinerU"]},
+            {"task": "text", "sources": ["FakeMinerU"]},
+        ],
+        "target_serialization": {"formula": "latex_plain_v1", "table": "enhanced_otsl_v1", "text": "plain_text_v1"},
+        "image_policy": {"materialization": {"mode": "embedded"}},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+        "shard_policy": {"rows_per_shard": 10},
+    }
+
+    report = ViewBuilder(canonical_root, view_root).build(config)
+
+    assert report.total_records == 1
+    train = pd.read_parquet(view_root / "train" / "part-00000.parquet")
+    assert train["task"].tolist() == ["text"]
+    stats = json.loads((view_root / "stats.json").read_text())
+    assert stats["filter_counts"]["empty_label"] == 2
 
 
 def test_sharded_source_reference_view_uses_root_assets_and_filename_refs(tmp_path):

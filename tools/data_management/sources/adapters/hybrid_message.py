@@ -83,6 +83,7 @@ class HybridMessageExportOptions:
     dataset_name: str
     source_image_root: Path | None = None
     image_extensions: tuple[str, ...] = DEFAULT_IMAGE_EXTENSIONS
+    image_materialization: str = "copy"
     max_samples: int | None = None
     shard_size: int = 5000
     allow_unreadable_images: bool = False
@@ -94,6 +95,8 @@ class HybridMessageExportOptions:
         if self.source_image_root is not None:
             self.source_image_root = Path(self.source_image_root)
         self.image_extensions = tuple(self.image_extensions)
+        if self.image_materialization not in {"copy", "source_reference"}:
+            raise ValueError("image_materialization must be copy or source_reference")
         if self.max_samples is not None and self.max_samples <= 0:
             raise ValueError("max_samples must be positive when set")
         if self.shard_size <= 0:
@@ -135,14 +138,32 @@ class HybridMessageSourceAdapter(SourceAdapter):
                 return None
             return resolve_path(value, base=profile_path.parent, dataset_root=root)
 
+        source_path = resolve_profile_path(data.get("source_path"))
+        data_file_value = data.get("data_file")
+        if data_file_value:
+            data_file_path = Path(str(data_file_value))
+            if data_file_path.is_absolute():
+                data_file = data_file_path
+            elif str(data_file_value).startswith(("sources/", "canonical", "views/")):
+                data_file = resolve_path(data_file_value, base=profile_path.parent, dataset_root=root)
+            elif source_path is not None:
+                data_file = source_path / data_file_path
+            else:
+                data_file = profile_path.parent / data_file_path
+        else:
+            if source_path is None:
+                raise ValueError("hybrid_message source profile requires source_path or data_file")
+            data_file = source_path / "data.json"
+
         return cls(
             HybridMessageExportOptions(
-                data_file=resolve_profile_path(data["source_path"]) / "data.json",
+                data_file=data_file,
                 dataset_name=data["dataset_name"],
                 source_image_root=resolve_profile_path(data.get("source_image_root") or data.get("source_path")),
                 image_extensions=tuple(
                     data.get("image_extensions", DEFAULT_IMAGE_EXTENSIONS)
                 ),
+                image_materialization=str(data.get("image_materialization", "copy")),
                 max_samples=int(data["max_samples"]) if data.get("max_samples") is not None else None,
                 shard_size=int(data.get("shard_size", 5000)),
                 allow_unreadable_images=bool(data.get("allow_unreadable_images", False)),
@@ -326,7 +347,7 @@ class HybridMessageSourceAdapter(SourceAdapter):
             raise ValueError(f"record {idx}: no image path")
 
         image_path = str(images[0])
-        source_image_path = Path(image_path)
+        source_image_path = self._resolve_source_image_path(Path(image_path))
         dataset_root = infer_dataset_root_from_path(canonical_root)
         user_content = messages[0].get("content", "")
         assistant_content = messages[1].get("content", "")
@@ -350,13 +371,20 @@ class HybridMessageSourceAdapter(SourceAdapter):
         )
         crop_asset_id = stable_id("asset", "region_crop", self.options.dataset_name, doc_hash, "0000")
         image_format = Path(image_path).suffix.lstrip(".") or "unknown"
-        crop_path, crop_width, crop_height, crop_format = _copy_region_image(
-            source_image_path,
-            dataset_root=dataset_root,
-            source_name=self.options.dataset_name,
-            asset_id=crop_asset_id,
-            extension=image_format,
-        )
+        if self.options.image_materialization == "source_reference":
+            crop_path, crop_width, crop_height, crop_format = _reference_region_image(
+                source_image_path,
+                dataset_root=dataset_root,
+                extension=image_format,
+            )
+        else:
+            crop_path, crop_width, crop_height, crop_format = _copy_region_image(
+                source_image_path,
+                dataset_root=dataset_root,
+                source_name=self.options.dataset_name,
+                asset_id=crop_asset_id,
+                extension=image_format,
+            )
         try:
             page_image_path = dataset_relative_path(source_image_path, dataset_root) if source_image_path.is_absolute() else image_path
         except ValueError:
@@ -460,6 +488,16 @@ class HybridMessageSourceAdapter(SourceAdapter):
             "task_records": {task: [task_record]},
         }
 
+    def _resolve_source_image_path(self, image_path: Path) -> Path:
+        by_name = self.options.source_image_root / image_path.name if self.options.source_image_root is not None else None
+        if self.options.image_materialization == "source_reference" and by_name is not None and by_name.is_file():
+            return by_name
+        if image_path.is_file():
+            return image_path
+        if by_name is not None and by_name.is_file():
+            return by_name
+        return image_path
+
 
 def _parse_target(task: str, assistant_content: str, width: int, height: int) -> dict[str, Any]:
     """Parse assistant content into canonical target format based on task type."""
@@ -545,6 +583,19 @@ def _copy_region_image(
     shutil.copyfile(source_image_path, output_path)
     width, height = _copied_image_dimensions(output_path)
     return relative_path.as_posix(), width, height, normalized_extension.lstrip(".")
+
+
+def _reference_region_image(
+    source_image_path: Path,
+    *,
+    dataset_root: Path,
+    extension: str,
+) -> tuple[str, int, int, str]:
+    if not source_image_path.is_file():
+        raise FileNotFoundError(f"source image does not exist: {source_image_path}")
+    relative_path = dataset_relative_path(source_image_path, dataset_root)
+    normalized_extension = _normalize_extension(extension)
+    return relative_path, 1, 1, normalized_extension.lstrip(".")
 
 
 def _normalize_extension(extension: str | None) -> str:

@@ -18,6 +18,7 @@ from tools.data_management.config.resolver import load_processing_config, resolv
 from tools.data_management.paths import dataset_relative_path, infer_dataset_root_from_path, resolve_dataset_path
 from tools.data_management.progress import ProgressReporter
 from tools.data_management.prompts import load_prompt_config, resolve_prompt
+from tools.data_management.otsl import html_to_otsl
 from tools.data_management.registry.configured import configured_reward_registry, configured_serializer_registry
 from tools.data_management.registry.reward_registry import default_reward_registry
 from tools.data_management.registry.serializer_registry import default_serializer_registry
@@ -241,18 +242,25 @@ class ViewBuilder:
         records = self._load_selected_records(config)
         records = self._apply_excludes(records, config.get("exclude") or [])
         records = self._apply_samples(records, config.get("sample") or [])
-        materialize_ctx = self._build_materialize_context(config)
-        records, filter_counts = self._apply_image_filters(records, materialize_ctx, progress=progress)
-        if not records:
-            raise ValueError("view image filters produced no records")
-        split_map = self._assign_splits(records, config.get("split_policy") or {})
-        rows_per_shard = _resolve_rows_per_shard(config)
         execution = self._resolve_execution(
             config,
             num_workers=num_workers,
             worker_batch_size=worker_batch_size,
             schema_sample_size=schema_sample_size,
         )
+        records, label_filter_counts = self._apply_label_filters(
+            records,
+            progress=progress,
+            num_workers=execution["num_workers"],
+            worker_batch_size=execution["worker_batch_size"],
+        )
+        materialize_ctx = self._build_materialize_context(config, records)
+        records, filter_counts = self._apply_image_filters(records, materialize_ctx, progress=progress)
+        filter_counts = {**label_filter_counts, **filter_counts}
+        if not records:
+            raise ValueError("view image filters produced no records")
+        split_map = self._assign_splits(records, config.get("split_policy") or {})
+        rows_per_shard = _resolve_rows_per_shard(config)
         if progress:
             progress.log(
                 "build-view",
@@ -458,6 +466,74 @@ class ViewBuilder:
             raise ValueError("view selection produced no records")
         return [to_plain(row) for row in rows]
 
+    def _apply_label_filters(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        progress: ProgressReporter | None = None,
+        num_workers: int = 1,
+        worker_batch_size: int = 256,
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        keep_flags: list[bool | None] = [None] * len(records)
+        html_checks: list[tuple[int, str]] = []
+        for index, record in enumerate(records):
+            target = record.get("target") or {}
+            if (
+                record.get("task") == "table"
+                and isinstance(target, dict)
+                and not target.get("enhanced_otsl")
+                and not target.get("otsl")
+                and target.get("html")
+            ):
+                html_checks.append((index, str(target["html"])))
+            else:
+                keep_flags[index] = _record_has_serializable_label(record)
+
+        if html_checks:
+            processed = 0
+            if num_workers == 1:
+                for batch in _iter_batches(html_checks, worker_batch_size):
+                    for index, keep in _html_label_check_batch(batch):
+                        keep_flags[index] = keep
+                    processed += len(batch)
+                    if progress:
+                        progress.update(
+                            "build-view",
+                            processed,
+                            total=len(html_checks),
+                            phase="label-filter-html",
+                        )
+            else:
+                with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                    for batch_result in executor.map(
+                        _html_label_check_batch,
+                        _iter_batches(html_checks, worker_batch_size),
+                    ):
+                        for index, keep in batch_result:
+                            keep_flags[index] = keep
+                        processed += len(batch_result)
+                        if progress:
+                            progress.update(
+                                "build-view",
+                                processed,
+                                total=len(html_checks),
+                                phase="label-filter-html",
+                            )
+
+        kept = [record for record, keep in zip(records, keep_flags, strict=True) if keep]
+        empty_label_count = len(records) - len(kept)
+        counts = {"empty_label": empty_label_count} if empty_label_count else {}
+        if progress and empty_label_count:
+            progress.log(
+                "build-view",
+                phase="label-filter",
+                input=len(records),
+                kept=len(kept),
+                dropped=empty_label_count,
+                empty_label=empty_label_count,
+            )
+        return kept, counts
+
     def _compute_sample_key_sets(self, config: dict[str, Any]) -> list[dict[str, Any]]:
         samples = config.get("sample") or []
         if isinstance(samples, dict):
@@ -547,7 +623,8 @@ class ViewBuilder:
             for sample in applicable:
                 key_field = sample["key_field"]
                 selected_keys = sample["selected_keys"]
-                mask &= df[key_field].astype(str).isin(selected_keys)
+                key_mask = [str(value) in selected_keys for value in df[key_field].tolist()]
+                mask &= pd.Series(key_mask, index=df.index)
             rows.extend(df.loc[mask].to_dict(orient="records"))
         return rows
 
@@ -696,14 +773,16 @@ class ViewBuilder:
             split_map[record["record_id"]] = split_by_key[key]
         return split_map
 
-    def _build_materialize_context(self, config: dict[str, Any]) -> dict[str, Any]:
+    def _build_materialize_context(self, config: dict[str, Any], records: list[dict[str, Any]]) -> dict[str, Any]:
         """Pre-load shared resources that _materialize needs for every record.
 
         Caching these avoids reloading the full asset manifest (640K+ records
         from disk) and re-parsing prompt configs once per record.
         """
+        asset_ids = {str(record["image_asset_id"]) for record in records}
+        source_names = {str(record["source_name"]) for record in records}
         return {
-            "asset_manifest": self.canonical_reader.read_asset_manifest(),
+            "asset_manifest": self.canonical_reader.read_asset_manifest(asset_ids=asset_ids, source_names=source_names),
             "prompt_config": load_prompt_config(config.get("prompt_profile") or config.get("model_family") or "default"),
             "image_transform_config": config.get("image_transform") or {},
             "image_materialization": _resolve_image_materialization(config),
@@ -862,6 +941,26 @@ def _default_serializer_for_task(task: str) -> str:
         raise KeyError(f"no default serializer for task {task}") from exc
 
 
+def _record_has_serializable_label(record: dict[str, Any]) -> bool:
+    target = record.get("target") or {}
+    if not isinstance(target, dict):
+        return False
+    task = record.get("task")
+    if task == "text":
+        return bool(str(target.get("text", "")))
+    if task == "formula":
+        return bool(str(target.get("latex", "")))
+    if task == "table":
+        if target.get("enhanced_otsl"):
+            return bool(str(target["enhanced_otsl"]))
+        if target.get("otsl"):
+            return bool(str(target["otsl"]))
+        if target.get("html"):
+            return bool(html_to_otsl(str(target["html"])))
+        return False
+    return True
+
+
 def _reward_profile_for_task(config: dict[str, Any], task: str) -> str:
     by_task = config.get("by_task") or {}
     return by_task.get(task) or config.get("default") or "normalized_levenshtein_v1"
@@ -928,6 +1027,15 @@ def _iter_materialize_batches(
             batch = []
     if batch:
         yield batch
+
+
+def _iter_batches(items: list[Any], batch_size: int):
+    for start in range(0, len(items), batch_size):
+        yield items[start : start + batch_size]
+
+
+def _html_label_check_batch(batch: list[tuple[int, str]]) -> list[tuple[int, bool]]:
+    return [(index, bool(html_to_otsl(html))) for index, html in batch]
 
 
 def _schema_sample_records(records: list[dict[str, Any]], sample_size: int) -> list[dict[str, Any]]:

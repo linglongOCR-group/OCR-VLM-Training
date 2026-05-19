@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 import shutil
 from dataclasses import asdict, dataclass, field
 from io import BytesIO
@@ -40,6 +40,7 @@ class PubTableExportOptions:
     output_root: Path | None = None
     num_workers: int = 1
     worker_chunksize: int = 256
+    max_in_flight: int | None = None
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir)
@@ -49,6 +50,8 @@ class PubTableExportOptions:
             raise ValueError("num_workers must be positive")
         if self.worker_chunksize <= 0:
             raise ValueError("worker_chunksize must be positive")
+        if self.max_in_flight is not None and self.max_in_flight <= 0:
+            raise ValueError("max_in_flight must be positive when set")
 
 
 @dataclass(slots=True)
@@ -81,6 +84,7 @@ class PubTableSourceAdapter(SourceAdapter):
 
         def resolve(val: str | None) -> Path | None:
             return resolve_path(val, base=profile_path.parent, dataset_root=Path(dataset_root)) if val else None
+        export_config = data.get("export") or {}
 
         return cls(
             PubTableExportOptions(
@@ -90,8 +94,15 @@ class PubTableSourceAdapter(SourceAdapter):
                 shard_size=int(data.get("shard_size", 10000)),
                 skip_errors=bool(data.get("skip_errors", False)),
                 output_root=resolve(data.get("output_root") or data.get("canonical_output")),
-                num_workers=int(data.get("num_workers", 1)),
-                worker_chunksize=int(data.get("worker_chunksize", 256)),
+                num_workers=int(export_config.get("num_workers", data.get("num_workers", 1))),
+                worker_chunksize=int(export_config.get("worker_chunksize", data.get("worker_chunksize", 256))),
+                max_in_flight=(
+                    int(export_config["max_in_flight"])
+                    if export_config.get("max_in_flight") is not None
+                    else int(data["max_in_flight"])
+                    if data.get("max_in_flight") is not None
+                    else None
+                ),
             )
         )
 
@@ -234,16 +245,21 @@ class PubTableSourceAdapter(SourceAdapter):
             return
 
         batches = _iter_batches(rows, self.options.worker_chunksize)
+        max_in_flight = self.options.max_in_flight or self.options.num_workers * 4
+        max_in_flight = max(max_in_flight, self.options.num_workers)
         with ProcessPoolExecutor(max_workers=self.options.num_workers) as pool:
-            for batch_results in pool.map(
-                _export_record_batch_star,
-                (
-                    (batch, self.options.dataset_name, selected_task_tuple, canonical_root, dataset_root)
-                    for batch in batches
-                ),
-                chunksize=1,
-            ):
-                yield from batch_results
+            in_flight: set[Future[list[dict[str, Any]]]] = set()
+            for batch in batches:
+                while len(in_flight) >= max_in_flight:
+                    yield from _drain_completed_exports(in_flight)
+                in_flight.add(
+                    pool.submit(
+                        _export_record_batch_star,
+                        (batch, self.options.dataset_name, selected_task_tuple, canonical_root, dataset_root),
+                    )
+                )
+            while in_flight:
+                yield from _drain_completed_exports(in_flight)
 
 
 def _export_record(
@@ -263,9 +279,9 @@ def _export_record(
     if not image_bytes:
         raise ValueError(f"record {idx}: no image bytes")
 
-    otsl_tokens = row.get("otsl", [])
-    if not otsl_tokens:
-        raise ValueError(f"record {idx}: no otsl tokens")
+    html_with_text = _join_html_with_text(row.get("html_with_text"))
+    if not html_with_text:
+        raise ValueError(f"record {idx}: no html_with_text")
 
     filename = Path(str(row.get("filename", f"table_{idx:06d}"))).name
     if not filename:
@@ -356,7 +372,6 @@ def _export_record(
         metadata={"filename": filename},
     )
 
-    otsl_str = "".join(str(token) for token in otsl_tokens)
     task_record = CanonicalTaskRecord(
         record_id=stable_id(task, source_name, region_id),
         task=task,
@@ -365,7 +380,7 @@ def _export_record(
         page_id=page_id,
         region_id=region_id,
         image_asset_id=crop_asset_id,
-        target={"otsl": otsl_str},
+        target={"html": html_with_text},
         category="table",
         provenance={"filename": filename},
         metadata={"width": width, "height": height},
@@ -378,6 +393,20 @@ def _export_record(
         "assets": [page_asset.to_dict(), crop_asset.to_dict()],
         "task_records": {task: [task_record.to_dict()]},
     }
+
+
+def _join_html_with_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        html = "".join(str(item) for item in value).strip()
+    else:
+        html = str(value).strip()
+    if html and "<table" not in html.lower():
+        html = f"<table>{html}</table>"
+    return html
 
 
 def _iter_pubtable_rows(data_dir: Path, max_samples: int | None) -> Iterable[dict[str, Any]]:
@@ -434,6 +463,14 @@ def _export_record_batch_star(args: tuple[list[dict[str, Any]], str, tuple[str, 
         _export_record_for_worker(item, source_name, selected_tasks, canonical_root, dataset_root)
         for item in batch
     ]
+
+
+def _drain_completed_exports(in_flight: set[Future[list[dict[str, Any]]]]) -> Iterable[dict[str, Any]]:
+    done, pending = wait(in_flight, return_when=FIRST_COMPLETED)
+    in_flight.clear()
+    in_flight.update(pending)
+    for future in done:
+        yield from future.result()
 
 
 class _ShardWriter:
