@@ -5,6 +5,8 @@ from typing import Any
 
 from omegaconf import DictConfig, open_dict
 
+from verl_plugins.trainers._utils import _as_bool
+
 
 @dataclass(frozen=True)
 class FreezeVisionTowerResult:
@@ -85,15 +87,3 @@ def install_freeze_vision_tower_hook(engine: Any, *, enabled: bool) -> bool:
     engine._build_fsdp_module = build_fsdp_module_with_frozen_vision
     engine._ocr_freeze_vision_tower_hook = True
     return True
-
-
-def _as_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off", "none", "null", ""}:
-            return False
-    return bool(value)

@@ -3,12 +3,26 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pyarrow.parquet as pq
 from PIL import Image
 
 from tools.data_management.paths import dataset_root_from_env, infer_dataset_root_from_path, resolve_dataset_path, validate_relative_path
+
+
+class ViewValidationTask(NamedTuple):
+    path: str
+    split: str
+    columns: tuple[str, ...]
+    read_columns: tuple[str, ...]
+    row_group_index: int
+    row_offset: int
+    data_root: str
+    assets_dir: str | None
+    require_images: bool
+    max_aspect_ratio: float | None
+    worker_batch_size: int
 
 
 def validate_view(
@@ -63,18 +77,18 @@ def validate_view(
         row_offset = 0
         for row_group_index in range(parquet_file.metadata.num_row_groups):
             tasks.append(
-                (
-                    path,
-                    split,
-                    tuple(columns),
-                    tuple(read_columns),
-                    row_group_index,
-                    row_offset,
-                    data_root,
-                    assets_dir,
-                    require_images,
-                    max_aspect_ratio,
-                    worker_batch_size,
+                ViewValidationTask(
+                    path=str(path),
+                    split=split,
+                    columns=tuple(columns),
+                    read_columns=tuple(read_columns),
+                    row_group_index=row_group_index,
+                    row_offset=row_offset,
+                    data_root=str(data_root),
+                    assets_dir=str(assets_dir) if assets_dir is not None else None,
+                    require_images=require_images,
+                    max_aspect_ratio=max_aspect_ratio,
+                    worker_batch_size=worker_batch_size,
                 )
             )
             row_offset += parquet_file.metadata.row_group(row_group_index).num_rows
@@ -105,11 +119,6 @@ def _split_name(root: Path, path: Path) -> str:
     return path.parent.name
 
 
-def _iter_rows(parquet_file: pq.ParquetFile, *, columns: list[str] | None = None, batch_size: int = 1024):
-    for row_group in range(parquet_file.metadata.num_row_groups):
-        yield from _iter_row_group_rows(parquet_file, row_group, columns=columns, batch_size=batch_size)
-
-
 def _iter_row_group_rows(
     parquet_file: pq.ParquetFile,
     row_group: int,
@@ -122,42 +131,29 @@ def _iter_row_group_rows(
         yield from batch.to_pylist()
 
 
-def _validate_view_row_group(task: tuple[Any, ...]) -> dict[str, set[str]]:
-    (
-        path,
-        split,
-        columns,
-        read_columns,
-        row_group_index,
-        row_offset,
-        data_root,
-        assets_dir,
-        require_images,
-        max_aspect_ratio,
-        worker_batch_size,
-    ) = task
-    path = Path(path)
-    data_root = Path(data_root)
-    assets_dir = Path(assets_dir) if assets_dir is not None else None
-    columns = set(columns)
+def _validate_view_row_group(task: ViewValidationTask) -> dict[str, set[str]]:
+    path = Path(task.path)
+    data_root = Path(task.data_root)
+    assets_dir = Path(task.assets_dir) if task.assets_dir is not None else None
+    columns = set(task.columns)
     parquet_file = pq.ParquetFile(path)
     seen_docs_by_split: dict[str, set[str]] = {}
     for local_index, row in enumerate(
-        _iter_row_group_rows(parquet_file, row_group_index, columns=read_columns, batch_size=worker_batch_size)
+        _iter_row_group_rows(parquet_file, task.row_group_index, columns=task.read_columns, batch_size=task.worker_batch_size)
     ):
         document_id = _validate_view_row(
             path,
-            row_offset + local_index,
+            task.row_offset + local_index,
             row,
             columns,
-            split,
+            task.split,
             data_root,
             assets_dir,
-            require_images,
-            max_aspect_ratio,
+            task.require_images,
+            task.max_aspect_ratio,
         )
         if document_id:
-            seen_docs_by_split.setdefault(str(document_id), set()).add(split)
+            seen_docs_by_split.setdefault(str(document_id), set()).add(task.split)
     return seen_docs_by_split
 
 

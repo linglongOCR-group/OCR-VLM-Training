@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hydra
 import logging
+import time
+from pathlib import Path
+
 import torch
 import torch.distributed
 from omegaconf import OmegaConf
@@ -17,6 +20,7 @@ from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.profiler import log_gpu_memory_usage
 from verl.utils.tracking import Tracking
 
+from verl_plugins.trainers._utils import _as_bool
 from verl_plugins.trainers.sft_freeze import extract_freeze_vision_tower, install_freeze_vision_tower_hook
 from verl_plugins.trainers.sft_position_ids import install_qwen_vl_position_ids_chunk_patch
 
@@ -83,7 +87,8 @@ class OcrSFTTrainer(SFTTrainer):
         if run_pre_validation:
             last_valid_metric = self._run_validation_once(meta_info, tracking=tracking, step=global_step)
 
-        train_time = 0
+        train_time = 0.0
+        _train_start = time.monotonic()
         total_tokens = 0
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             self.train_sampler.set_epoch(epoch=epoch)
@@ -145,6 +150,7 @@ class OcrSFTTrainer(SFTTrainer):
 
                 if is_last_step:
                     if is_logging:
+                        train_time = time.monotonic() - _train_start
                         print(f"Total time for train steps: {train_time:.2f}s")
                         print(f"Final validation metrics: {last_valid_metric}")
                     return
@@ -223,18 +229,6 @@ def _distributed_barrier_if_initialized() -> None:
         torch.distributed.barrier()
 
 
-def _as_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off", "none", "null", ""}:
-            return False
-    return bool(value)
-
-
 def run_sft(config) -> None:
     freeze_vision_tower = extract_freeze_vision_tower(config)
     install_qwen_vl_position_ids_chunk_patch()
@@ -245,7 +239,7 @@ def run_sft(config) -> None:
     destroy_global_process_group()
 
 
-@hydra.main(config_path="/verl/verl/trainer/config", config_name="sft_trainer_engine", version_base=None)
+@hydra.main(config_path=str(Path(__import__("verl").__file__).parent / "trainer" / "config"), config_name="sft_trainer_engine", version_base=None)
 def main(config) -> None:
     auto_set_device(config)
     run_sft(config)

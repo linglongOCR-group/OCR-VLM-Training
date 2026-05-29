@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import shutil
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 from tools.data_management.canonical.reader import CanonicalReader
 from tools.data_management.config.resolver import load_processing_config, resolve_path
@@ -26,11 +29,19 @@ from tools.data_management.schemas import ViewRecord, stable_hash, stable_id, to
 from tools.data_management.utils.io import read_yaml, write_json
 
 
-_WORKER_BUILDER: "ViewBuilder | None" = None
-_WORKER_CONFIG: dict[str, Any] | None = None
-_WORKER_CONTEXT: dict[str, Any] | None = None
-_WORKER_VIEW_NAME: str | None = None
-_WORKER_STAGE: str | None = None
+def _key_field_for_level(level: str) -> str:
+    return "record_id" if level == "record" else "page_id" if level == "page" else "document_id"
+
+
+@dataclass
+class _WorkerState:
+    builder: Any
+    config: dict[str, Any]
+    context: dict[str, Any]
+    view_name: str
+    stage: str
+
+_WORKER_STATE: _WorkerState | None = None
 
 
 @dataclass(slots=True)
@@ -278,8 +289,6 @@ class ViewBuilder:
                 shutil.rmtree(view_assets_dir)
             except FileNotFoundError:
                 pass
-        if _uses_root_view_assets(materialize_ctx["image_materialization"]):
-            view_assets_dir.mkdir(parents=True, exist_ok=True)
         materialize_ctx["view_assets_dir"] = view_assets_dir
         output_dir = self.view_root
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -452,7 +461,7 @@ class ViewBuilder:
             schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
         if not schemas:
             raise ValueError("view selection produced no records")
-        return pa.unify_schemas(schemas)
+        return _ensure_view_schema_columns(pa.unify_schemas(schemas))
 
     def _load_selected_records(self, config: dict[str, Any]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -551,7 +560,7 @@ class ViewBuilder:
             if count < 0:
                 raise ValueError("sample count must be non-negative")
             level = sample.get("level", "document")
-            key_field = "record_id" if level == "record" else "page_id" if level == "page" else "document_id"
+            key_field = _key_field_for_level(level)
             sources = set(sample.get("sources") or [])
             tasks = set(sample.get("tasks") or [])
             where = sample.get("where") or {}
@@ -716,7 +725,7 @@ class ViewBuilder:
             if count < 0:
                 raise ValueError("sample count must be non-negative")
             level = sample.get("level", "document")
-            key_field = "record_id" if level == "record" else "page_id" if level == "page" else "document_id"
+            key_field = _key_field_for_level(level)
             sources = set(sample.get("sources") or [])
             tasks = set(sample.get("tasks") or [])
             where = sample.get("where") or {}
@@ -761,7 +770,7 @@ class ViewBuilder:
         split_by_key: dict[str, str] = {}
         split_map: dict[str, str] = {}
         for record in records:
-            key = record["record_id"] if level == "record" else record["page_id"] if level == "page" else record["document_id"]
+            key = record[_key_field_for_level(level)]
             if key not in split_by_key:
                 value = int(hashlib.sha256(f"{seed}:{key}".encode("utf-8")).hexdigest()[:12], 16) / float(16**12)
                 if value < train_ratio:
@@ -998,11 +1007,6 @@ def _resolve_image_filter(config: dict[str, Any]) -> dict[str, float]:
     return {"max_aspect_ratio": max_aspect_ratio}
 
 
-def _uses_root_view_assets(image_materialization: dict[str, Any]) -> bool:
-    del image_materialization
-    return False
-
-
 def _resolve_rows_per_shard(config: dict[str, Any]) -> int | None:
     policy = config.get("shard_policy") or config.get("sharding") or {}
     value = policy.get("rows_per_shard", policy.get("shard_size"))
@@ -1051,6 +1055,19 @@ def _schema_sample_records(records: list[dict[str, Any]], sample_size: int) -> l
     return sampled
 
 
+def _ensure_view_schema_columns(schema: pa.Schema) -> pa.Schema:
+    fields = list(schema)
+    names = set(schema.names)
+    stable_fields = {
+        "images_bytes": pa.field("images_bytes", pa.list_(pa.binary())),
+        "images_path": pa.field("images_path", pa.list_(pa.string())),
+    }
+    for name, field in stable_fields.items():
+        if name not in names:
+            fields.append(field)
+    return pa.schema(fields)
+
+
 def _init_view_worker(
     processing_config: Any | None,
     config: dict[str, Any],
@@ -1058,30 +1075,26 @@ def _init_view_worker(
     view_name: str,
     stage: str,
 ) -> None:
-    global _WORKER_BUILDER, _WORKER_CONFIG, _WORKER_CONTEXT, _WORKER_VIEW_NAME, _WORKER_STAGE
-    _WORKER_BUILDER = ViewBuilder(".", ".", processing_config=processing_config)
-    _WORKER_CONFIG = config
-    _WORKER_CONTEXT = materialize_ctx
-    _WORKER_VIEW_NAME = view_name
-    _WORKER_STAGE = stage
+    global _WORKER_STATE
+    _WORKER_STATE = _WorkerState(
+        builder=ViewBuilder(".", ".", processing_config=processing_config),
+        config=config,
+        context=materialize_ctx,
+        view_name=view_name,
+        stage=stage,
+    )
 
 
 def _materialize_record_batch(batch: list[tuple[dict[str, Any], str]]) -> list[dict[str, Any]]:
-    if (
-        _WORKER_BUILDER is None
-        or _WORKER_CONFIG is None
-        or _WORKER_CONTEXT is None
-        or _WORKER_VIEW_NAME is None
-        or _WORKER_STAGE is None
-    ):
+    if _WORKER_STATE is None:
         raise RuntimeError("view materialization worker is not initialized")
     return [
-        _WORKER_BUILDER._materialize(
+        _WORKER_STATE.builder._materialize(
             record,
-            _WORKER_CONFIG,
-            _WORKER_CONTEXT,
-            view_name=_WORKER_VIEW_NAME,
-            stage=_WORKER_STAGE,
+            _WORKER_STATE.config,
+            _WORKER_STATE.context,
+            view_name=_WORKER_STATE.view_name,
+            stage=_WORKER_STATE.stage,
             split=split,
         )
         for record, split in batch
@@ -1170,16 +1183,9 @@ def _read_image_file_bytes(image_path: str | None) -> bytes | None:
         return None
     try:
         return Path(image_path).read_bytes()
-    except Exception:
+    except OSError:
+        logger.warning("failed to read image file: %s", image_path)
         return None
-
-
-def _asset_dirs_for_row(ctx: dict[str, Any], split: str) -> tuple[Path, Path]:
-    resolver = ctx.get("asset_dir_resolver")
-    if resolver:
-        return resolver(split)
-    assets_dir = ctx["view_assets_dir"]
-    return assets_dir, assets_dir
 
 
 def _save_view_asset(
@@ -1232,7 +1238,8 @@ def _transform_and_encode(image_path: str | None, image_transform: dict[str, Any
 
     try:
         img = Image.open(image_path).convert("RGB")
-    except Exception:
+    except OSError:
+        logger.warning("failed to open image for transform: %s", image_path)
         return None
 
     orig_w, orig_h = img.size
