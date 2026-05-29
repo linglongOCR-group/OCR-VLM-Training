@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> None:
     build_view = subparsers.add_parser("build-view")
     build_view.add_argument("view_config")
     build_view.add_argument("--config")
-    build_view.add_argument("--overwrite", action="store_true", default=True)
+    build_view.add_argument("--overwrite", action="store_true", default=False)
     build_view.add_argument("--num-workers", type=int)
     build_view.add_argument("--worker-batch-size", type=int)
     build_view.add_argument("--schema-sample-size", type=int)
