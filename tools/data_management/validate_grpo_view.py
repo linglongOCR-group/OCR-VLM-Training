@@ -164,12 +164,6 @@ def validate_grpo_view(
                 raise ValueError(f"{path}:{row_index} missing image data")
 
 
-def _default_assets_dir(path: Path) -> Path:
-    if path.parent.name in {"train", "val", "test"}:
-        return path.parent.parent / "assets"
-    return path.parent / "assets"
-
-
 def _view_root_for_file(path: Path) -> Path:
     if path.parent.name in {"train", "val", "test"}:
         return path.parent.parent
