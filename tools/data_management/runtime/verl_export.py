@@ -4,10 +4,19 @@ from typing import Any
 
 from tools.data_management.registry.reward_registry import default_reward_registry
 
+_DEFAULT_REWARD_REGISTRY = None
+
+
+def _get_default_reward_registry():
+    global _DEFAULT_REWARD_REGISTRY
+    if _DEFAULT_REWARD_REGISTRY is None:
+        _DEFAULT_REWARD_REGISTRY = default_reward_registry()
+    return _DEFAULT_REWARD_REGISTRY
+
 
 class VerlRewardWrapper:
     def __init__(self) -> None:
-        self.reward_registry = default_reward_registry()
+        self.reward_registry = _get_default_reward_registry()
 
     def __call__(self, data_item: dict[str, Any], model_output: str) -> float:
         profile_id = data_item["reward_profile_id"]
