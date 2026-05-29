@@ -79,14 +79,14 @@ openspec/
 
 | Document | Location | Status |
 |---|---|---|
-| `README.md` | Root | Preserved in place. Cross-references added to OpenSpec. |
-| `SPEC.md` | Root | Preserved in place. Source for training-bootstrap spec. |
-| `docs/dataset-data-spec.md` | `docs/` | Preserved in place. Source for dataset-architecture and view-construction specs. |
-| `docs/dataset-process-module-spec.md` | `docs/` | Preserved in place. Source for data-ingestion, reward-system, target-serialization, cli specs. |
-| `docs/mineru-data-format.md` | `docs/` | Preserved in place. Source for mineru-data-format spec. |
-| `docs/codebase-audit-report.md` | `docs/archive/` | Archived. Historical snapshot from 2026-05-27. |
-| `docs/legacy/completed-items.md` | `docs/archive/` | Archived. Historical log from 2026-04-21. |
-| `docs/superpowers/specs/2026-05-07-checkpoint-lineage-design.md` | `docs/superpowers/specs/` | Preserved in place. Converted to OpenSpec change. |
+| `README.md` | Root | Preserved in place. Operational instructions remain. |
+| `SPEC.md` | `docs/archive/SPEC.md` | Archived. Content lives in `openspec/specs/training-bootstrap/`. |
+| `docs/dataset-data-spec.md` | `docs/archive/dataset-data-spec.md` | Archived. Content lives in `openspec/specs/dataset-architecture/` and `openspec/specs/view-construction/`. |
+| `docs/dataset-process-module-spec.md` | `docs/archive/dataset-process-module-spec.md` | Archived. Content lives in `openspec/specs/data-ingestion/`, `reward-system/`, `target-serialization/`, `cli/`, `validation/`. |
+| `docs/mineru-data-format.md` | `docs/archive/mineru-data-format.md` | Archived. Content lives in `openspec/specs/mineru-data-format/`. |
+| `docs/superpowers/specs/2026-05-07-checkpoint-lineage-design.md` | `docs/archive/checkpoint-lineage-design.md` | Archived. Content lives in `openspec/changes/checkpoint-lineage-tracking/`. |
+| `docs/codebase-audit-report.md` | `docs/archive/codebase-audit-report.md` | Archived. Historical snapshot from 2026-05-27. |
+| `docs/legacy/completed-items.md` | `docs/archive/completed-items.md` | Archived. Historical log from 2026-04-21. |
 
 ## Validation Results
 
