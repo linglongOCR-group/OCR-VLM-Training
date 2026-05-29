@@ -2,10 +2,7 @@ checkpoints/
 kernel_meta/
 outputs/
 sources/
-!configs/data/sources/
-configs/data/sources/*
-!configs/data/sources/haoy_syn_formula.yaml
-!configs/data/sources/pubtable1m.yaml
+logs/
 wandb.key
 .claude/
 .codex

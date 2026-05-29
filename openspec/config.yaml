@@ -1,0 +1,28 @@
+schema: spec-driven
+
+context: |
+  OCR VLM training integration layer built on VERL for SFT and GRPO experiments
+  on Ascend/NPU infrastructure. Three-layer dataset architecture: Source -> Canonical -> View.
+  The data CLI is `docds`. Environment root is OCR_DATA_ROOT. Training framework is VERL.
+  Ray for multi-node. WandB for experiment tracking. Local/mounted storage for checkpoints.
+  Current capabilities are documented under openspec/specs/.
+  Proposed changes are documented under openspec/changes/.
+  Keep behavior requirements separate from implementation details.
+
+rules:
+  specs:
+    - Use behavior-first requirements with SHALL/MUST/SHOULD modal verbs.
+    - Every requirement must include at least one Scenario with GIVEN/WHEN/THEN.
+    - Keep implementation details out of spec.md. Put them in design.md or docs/architecture/.
+    - Reference the source document when requirements are inferred rather than explicitly stated.
+    - Mark ambiguous requirements with "Needs clarification".
+  design:
+    - Document architecture decisions and trade-offs.
+    - Include migration and rollback notes for risky changes.
+    - Separate current behavior from proposed behavior.
+  tasks:
+    - Use hierarchical checkbox numbering.
+    - Keep tasks small enough for one implementation session.
+  proposal:
+    - Always include Scope, Impact, Risks, and Open Questions sections.
+    - Keep proposals under 800 words.
