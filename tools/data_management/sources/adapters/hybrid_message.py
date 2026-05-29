@@ -4,11 +4,10 @@ import json
 import os
 import re
 import shutil
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-import pandas as pd
 from PIL import Image
 
 from tools.data_management.canonical.writer import CanonicalWriteReport, CanonicalWriter
@@ -24,10 +23,15 @@ from tools.data_management.schemas import (
     stable_hash,
     stable_id,
 )
+from tools.data_management.sources.adapters._shared import (
+    ExportReport,
+    ShardWriter,
+    region_crop_relative_path,
+)
 from tools.data_management.sources.adapters.base import SourceAdapter
 from tools.data_management.utils.io import read_yaml
 
-DEFAULT_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+DEFAULT_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 DEFAULT_TASKS = ("layout", "text", "table", "formula")
 
 #
@@ -103,19 +107,6 @@ class HybridMessageExportOptions:
             raise ValueError("shard_size must be positive")
 
 
-@dataclass(slots=True)
-class HybridMessageExportReport:
-    dataset_name: str
-    scanned_samples: int = 0
-    skipped_samples: int = 0
-    documents: int = 0
-    pages: int = 0
-    regions: int = 0
-    task_records: dict[str, int] = field(default_factory=dict)
-    assets: int = 0
-    errors: list[dict[str, str]] = field(default_factory=list)
-
-
 class HybridMessageSourceAdapter(SourceAdapter):
     name = "hybrid_message"
     version = "1.0.0"
@@ -174,16 +165,6 @@ class HybridMessageSourceAdapter(SourceAdapter):
             )
         )
 
-    def scan_documents(self) -> Iterable[dict]:
-        records = self._load_records()
-        for idx, record in enumerate(records):
-            images = record.get("images", [])
-            img_path = images[0] if images else ""
-            yield {
-                "source_document_id": f"record_{idx:06d}",
-                "image_path": img_path,
-            }
-
     def export(
         self,
         canonical_root: str | Path,
@@ -210,23 +191,23 @@ class HybridMessageSourceAdapter(SourceAdapter):
         manifest_writer = CanonicalWriter(
             canonical_root, overwrite_partitions=overwrite_partitions
         )
-        report = HybridMessageExportReport(dataset_name=self.options.dataset_name)
+        report = ExportReport(dataset_name=self.options.dataset_name)
 
-        document_writer = _ShardWriter(
+        document_writer = ShardWriter(
             canonical_root
             / "entities/documents"
             / f"source={self.options.dataset_name}",
             self.options.shard_size,
             overwrite=overwrite_partitions,
         )
-        page_writer = _ShardWriter(
+        page_writer = ShardWriter(
             canonical_root
             / "entities/pages"
             / f"source={self.options.dataset_name}",
             self.options.shard_size,
             overwrite=overwrite_partitions,
         )
-        region_writer = _ShardWriter(
+        region_writer = ShardWriter(
             canonical_root
             / "entities/regions"
             / f"source={self.options.dataset_name}",
@@ -234,14 +215,14 @@ class HybridMessageSourceAdapter(SourceAdapter):
             overwrite=overwrite_partitions,
         )
         task_writers = {
-            task: _ShardWriter(
+            task: ShardWriter(
                 canonical_root / "records" / task / f"source={self.options.dataset_name}",
                 self.options.shard_size,
                 overwrite=overwrite_partitions,
             )
             for task in selected_tasks
         }
-        asset_writer = _ShardWriter(
+        asset_writer = ShardWriter(
             canonical_root
             / "assets/manifests"
             / f"source={self.options.dataset_name}",
@@ -333,7 +314,10 @@ class HybridMessageSourceAdapter(SourceAdapter):
 
     def _load_records(self) -> list[dict[str, Any]]:
         with open(self.options.data_file, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError(f"data file must contain a JSON array, got {type(data).__name__}")
+        return data
 
     def _export_record(
         self, idx: int, record: dict[str, Any], selected_tasks: set[str], canonical_root: Path
@@ -613,35 +597,3 @@ def _copied_image_dimensions(path: Path) -> tuple[int, int]:
             return image.size
     except Exception:
         return 1, 1
-
-
-class _ShardWriter:
-    def __init__(self, output_dir: Path, shard_size: int, *, overwrite: bool) -> None:
-        self.output_dir = output_dir
-        self.shard_size = shard_size
-        self.buffer: list[dict[str, Any]] = []
-        self.shard_index = 0
-        self.count = 0
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        if overwrite:
-            for stale in self.output_dir.glob("part-*.parquet"):
-                stale.unlink()
-
-    def write_many(self, rows: Iterable[dict[str, Any]]) -> None:
-        for row in rows:
-            self.buffer.append(row)
-            self.count += 1
-            if len(self.buffer) >= self.shard_size:
-                self.flush()
-
-    def flush(self) -> None:
-        if not self.buffer:
-            return
-        pd.DataFrame(self.buffer).to_parquet(
-            self.output_dir / f"part-{self.shard_index:05d}.parquet", index=False
-        )
-        self.buffer = []
-        self.shard_index += 1
-
-    def close(self) -> None:
-        self.flush()

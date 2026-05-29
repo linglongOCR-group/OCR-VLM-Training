@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import Future, ProcessPoolExecutor
 import shutil
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable
@@ -24,6 +24,11 @@ from tools.data_management.schemas import (
     stable_id,
 )
 from tools.data_management.sources.adapters.base import SourceAdapter
+from tools.data_management.sources.adapters._shared import (
+    ExportReport,
+    ShardWriter,
+    drain_completed_exports,
+)
 from tools.data_management.utils.io import read_yaml
 
 
@@ -54,25 +59,9 @@ class PubTableExportOptions:
             raise ValueError("max_in_flight must be positive when set")
 
 
-@dataclass(slots=True)
-class PubTableExportReport:
-    dataset_name: str
-    scanned_samples: int = 0
-    skipped_samples: int = 0
-    documents: int = 0
-    pages: int = 0
-    regions: int = 0
-    task_records: dict[str, int] = field(default_factory=dict)
-    assets: int = 0
-    errors: list[dict[str, str]] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
 class PubTableSourceAdapter(SourceAdapter):
     name = "pubtable"
-    version = "1.0"
+    version = "1.0.0"
 
     def __init__(self, options: PubTableExportOptions) -> None:
         self.options = options
@@ -106,9 +95,6 @@ class PubTableSourceAdapter(SourceAdapter):
             )
         )
 
-    def scan_documents(self) -> Iterable[dict]:
-        return []
-
     def export(
         self,
         canonical_root: str | Path,
@@ -136,27 +122,27 @@ class PubTableSourceAdapter(SourceAdapter):
             )
 
         manifest_writer = CanonicalWriter(canonical_root, overwrite_partitions=overwrite_partitions)
-        report = PubTableExportReport(dataset_name=self.options.dataset_name)
-        document_writer = _ShardWriter(
+        report = ExportReport(dataset_name=self.options.dataset_name)
+        document_writer = ShardWriter(
             canonical_root / "entities/documents" / f"source={self.options.dataset_name}",
             self.options.shard_size,
             overwrite=overwrite_partitions,
             id_column="document_id",
         )
-        page_writer = _ShardWriter(
+        page_writer = ShardWriter(
             canonical_root / "entities/pages" / f"source={self.options.dataset_name}",
             self.options.shard_size,
             overwrite=overwrite_partitions,
             id_column="page_id",
         )
-        region_writer = _ShardWriter(
+        region_writer = ShardWriter(
             canonical_root / "entities/regions" / f"source={self.options.dataset_name}",
             self.options.shard_size,
             overwrite=overwrite_partitions,
             id_column="region_id",
         )
         task_writers = {
-            task: _ShardWriter(
+            task: ShardWriter(
                 canonical_root / "records" / task / f"source={self.options.dataset_name}",
                 self.options.shard_size,
                 overwrite=overwrite_partitions,
@@ -164,7 +150,7 @@ class PubTableSourceAdapter(SourceAdapter):
             )
             for task in selected_tasks
         }
-        asset_writer = _ShardWriter(
+        asset_writer = ShardWriter(
             canonical_root / "assets/manifests" / f"source={self.options.dataset_name}",
             self.options.shard_size,
             overwrite=overwrite_partitions,
@@ -251,7 +237,7 @@ class PubTableSourceAdapter(SourceAdapter):
             in_flight: set[Future[list[dict[str, Any]]]] = set()
             for batch in batches:
                 while len(in_flight) >= max_in_flight:
-                    yield from _drain_completed_exports(in_flight)
+                    yield from drain_completed_exports(in_flight)
                 in_flight.add(
                     pool.submit(
                         _export_record_batch_star,
@@ -259,7 +245,7 @@ class PubTableSourceAdapter(SourceAdapter):
                     )
                 )
             while in_flight:
-                yield from _drain_completed_exports(in_flight)
+                yield from drain_completed_exports(in_flight)
 
 
 def _export_record(
@@ -463,62 +449,3 @@ def _export_record_batch_star(args: tuple[list[dict[str, Any]], str, tuple[str, 
         _export_record_for_worker(item, source_name, selected_tasks, canonical_root, dataset_root)
         for item in batch
     ]
-
-
-def _drain_completed_exports(in_flight: set[Future[list[dict[str, Any]]]]) -> Iterable[dict[str, Any]]:
-    done, pending = wait(in_flight, return_when=FIRST_COMPLETED)
-    in_flight.clear()
-    in_flight.update(pending)
-    for future in done:
-        yield from future.result()
-
-
-class _ShardWriter:
-    def __init__(self, output_dir: Path, shard_size: int, *, overwrite: bool, id_column: str | None = None) -> None:
-        self.output_dir = output_dir
-        self.shard_size = shard_size
-        self.buffer: list[dict[str, Any]] = []
-        self.shard_index = 0
-        self.count = 0
-        self.id_column = id_column
-        if overwrite and output_dir.exists():
-            for f in output_dir.glob("part-*.parquet"):
-                f.unlink()
-
-    def write(self, record: dict[str, Any]) -> None:
-        self.buffer.append(record)
-        if len(self.buffer) >= self.shard_size:
-            self.flush()
-
-    def write_many(self, records: list[dict[str, Any]]) -> None:
-        for record in records:
-            self.write(record)
-
-    def flush(self) -> None:
-        if not self.buffer:
-            return
-        import pandas as pd
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        out_path = self.output_dir / f"part-{self.shard_index:05d}.parquet"
-        frame = pd.DataFrame(self.buffer)
-        if self.id_column and self.id_column in frame.columns:
-            existing = set(_read_existing_ids(out_path, self.id_column))
-            frame = frame[~frame[self.id_column].isin(existing)]
-            if frame.empty:
-                self.buffer = []
-                return
-        frame.to_parquet(out_path, index=False)
-        self.count += len(self.buffer)
-        self.buffer = []
-        self.shard_index += 1
-
-    def close(self) -> None:
-        self.flush()
-
-
-def _read_existing_ids(path: Path, id_column: str) -> set[str]:
-    if not path.exists():
-        return set()
-    import pandas as pd
-    frame = pd.read_parquet(path, columns=[id_column])
-    return set(str(v) for v in frame[id_column])

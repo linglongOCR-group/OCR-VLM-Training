@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import traceback
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import Future, ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -26,6 +26,16 @@ from tools.data_management.schemas import (
     CanonicalTaskRecord,
     stable_hash,
     stable_id,
+)
+from tools.data_management.sources.adapters._shared import (
+    ExportReport,
+    ShardWriter,
+    drain_completed_exports,
+    assets_files_dir,
+    assets_manifest_dir,
+    entity_dir,
+    records_dir,
+    region_crop_relative_path,
 )
 from tools.data_management.sources.adapters.base import SourceAdapter
 from tools.data_management.utils.io import read_yaml
@@ -90,20 +100,6 @@ class MinerUExportOptions:
             raise ValueError("max_in_flight must be positive when set")
 
 
-@dataclass(slots=True)
-class MinerUExportReport:
-    dataset_name: str
-    scanned_samples: int = 0
-    skipped_samples: int = 0
-    skipped_completed_samples: int = 0
-    documents: int = 0
-    pages: int = 0
-    regions: int = 0
-    task_records: dict[str, int] = field(default_factory=dict)
-    assets: int = 0
-    errors: list[dict[str, str]] = field(default_factory=list)
-
-
 @dataclass(frozen=True, slots=True)
 class MinerUSample:
     sample_id: str
@@ -159,10 +155,6 @@ class MinerUSourceAdapter(SourceAdapter):
             )
         )
 
-    def scan_documents(self) -> Iterable[dict]:
-        for sample in _discover_samples(self.options):
-            yield {"source_document_id": sample.sample_id, "sample_dir": str(sample.sample_dir)}
-
     def export(
         self,
         canonical_root: str | Path,
@@ -199,27 +191,27 @@ class MinerUSourceAdapter(SourceAdapter):
                     completed=len(completed_source_document_ids),
                 )
             manifest_writer = CanonicalWriter(canonical_root, overwrite_partitions=overwrite_partitions)
-            report = MinerUExportReport(dataset_name=self.options.dataset_name)
-            document_writer = _ShardWriter(
+            report = ExportReport(dataset_name=self.options.dataset_name)
+            document_writer = ShardWriter(
                 canonical_root / "entities/documents" / f"source={self.options.dataset_name}",
                 self.options.shard_size,
                 overwrite=overwrite_partitions,
                 id_column="document_id",
             )
-            page_writer = _ShardWriter(
+            page_writer = ShardWriter(
                 canonical_root / "entities/pages" / f"source={self.options.dataset_name}",
                 self.options.shard_size,
                 overwrite=overwrite_partitions,
                 id_column="page_id",
             )
-            region_writer = _ShardWriter(
+            region_writer = ShardWriter(
                 canonical_root / "entities/regions" / f"source={self.options.dataset_name}",
                 self.options.shard_size,
                 overwrite=overwrite_partitions,
                 id_column="region_id",
             )
             task_writers = {
-                task: _ShardWriter(
+                task: ShardWriter(
                     canonical_root / "records" / task / f"source={self.options.dataset_name}",
                     self.options.shard_size,
                     overwrite=overwrite_partitions,
@@ -227,7 +219,7 @@ class MinerUSourceAdapter(SourceAdapter):
                 )
                 for task in selected_tasks
             }
-            asset_writer = _ShardWriter(
+            asset_writer = ShardWriter(
                 canonical_root / "assets/manifests" / f"source={self.options.dataset_name}",
                 self.options.shard_size,
                 overwrite=overwrite_partitions,
@@ -352,15 +344,15 @@ class MinerUSourceAdapter(SourceAdapter):
                 chunk.append(sample)
                 if len(chunk) >= self.options.worker_chunksize:
                     while len(in_flight) >= max_in_flight:
-                        yield from _drain_completed_exports(in_flight)
+                        yield from drain_completed_exports(in_flight)
                     submit_chunk(chunk)
                     chunk = []
             if chunk:
                 while len(in_flight) >= max_in_flight:
-                    yield from _drain_completed_exports(in_flight)
+                    yield from drain_completed_exports(in_flight)
                 submit_chunk(chunk)
             while in_flight:
-                yield from _drain_completed_exports(in_flight)
+                yield from drain_completed_exports(in_flight)
 
     def _export_sample(self, sample: MinerUSample, selected_tasks: set[str], canonical_root: Path) -> dict[str, Any]:
         return self._export_sample_records(sample, selected_tasks, canonical_root)
@@ -654,25 +646,6 @@ def _limited_samples(options: MinerUExportOptions) -> Iterable[MinerUSample]:
         yield sample
 
 
-def _chunked(samples: Iterable[MinerUSample], chunk_size: int) -> Iterable[list[MinerUSample]]:
-    chunk: list[MinerUSample] = []
-    for sample in samples:
-        chunk.append(sample)
-        if len(chunk) >= chunk_size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
-
-
-def _drain_completed_exports(in_flight: set[Future[list[dict[str, Any]]]]) -> Iterable[dict[str, Any]]:
-    done, pending = wait(in_flight, return_when=FIRST_COMPLETED)
-    in_flight.clear()
-    in_flight.update(pending)
-    for future in done:
-        for result in future.result():
-            yield result
-
 
 def _export_sample_chunk_for_worker(
     options: MinerUExportOptions,
@@ -734,11 +707,11 @@ def _load_completed_source_document_ids(canonical_root: Path, source_name: str) 
 def _write_exported_rows(
     exported: dict[str, Any],
     *,
-    document_writer: "_ShardWriter",
-    page_writer: "_ShardWriter",
-    region_writer: "_ShardWriter",
-    asset_writer: "_ShardWriter",
-    task_writers: dict[str, "_ShardWriter"],
+    document_writer: "ShardWriter",
+    page_writer: "ShardWriter",
+    region_writer: "ShardWriter",
+    asset_writer: "ShardWriter",
+    task_writers: dict[str, "ShardWriter"],
 ) -> None:
     document_writer.write_many(exported["documents"])
     page_writer.write_many(exported["pages"])
@@ -803,36 +776,11 @@ class _RegionCropSaver:
         image_width, image_height = self.image.size
         crop_box = _bbox_to_image_crop_box(bbox, self.page_width, self.page_height, image_width, image_height)
         crop = self.image.crop(crop_box)
-        relative_path = _region_crop_relative_path(self.source_name, asset_id)
+        relative_path = region_crop_relative_path(self.source_name, asset_id)
         output_path = self.dataset_root / relative_path
         output_path.parent.mkdir(parents=True, exist_ok=True)
         crop.save(output_path, format="JPEG", quality=95)
         return relative_path.as_posix(), crop.width, crop.height
-
-
-def _save_region_crop(
-    source_image_path: Path,
-    bbox: list[float],
-    *,
-    page_width: int,
-    page_height: int,
-    dataset_root: Path,
-    source_name: str,
-    asset_id: str,
-) -> tuple[str, int, int]:
-    with _RegionCropSaver(
-        source_image_path,
-        page_width=page_width,
-        page_height=page_height,
-        dataset_root=dataset_root,
-        source_name=source_name,
-    ) as crop_saver:
-        return crop_saver.save(bbox, asset_id)
-
-
-def _region_crop_relative_path(source_name: str, asset_id: str) -> Path:
-    safe_asset_id = asset_id.replace(":", "_").replace("/", "_")
-    return Path("canonical") / "assets" / "files" / f"source={source_name}" / "region_crop" / safe_asset_id[:2] / f"{safe_asset_id}.jpg"
 
 
 def _bbox_to_image_crop_box(
@@ -921,67 +869,3 @@ def _prefixed_image_candidates(sample_id: str, options: MinerUExportOptions) -> 
         if path.is_file() and path.suffix in extensions and path.stem.startswith(sample_id)
     )
     return sorted(candidates, key=lambda path: path.name)
-
-
-class _ShardWriter:
-    def __init__(self, output_dir: Path, shard_size: int, *, overwrite: bool, id_column: str | None = None) -> None:
-        self.output_dir = output_dir
-        self.shard_size = shard_size
-        self.buffer: list[dict[str, Any]] = []
-        self.shard_index = 0
-        self.count = 0
-        self.id_column = id_column
-        self.existing_ids: set[str] = set()
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        if overwrite:
-            for stale in self.output_dir.glob("part-*.parquet"):
-                stale.unlink()
-        else:
-            self._load_existing_state()
-
-    def write_many(self, rows: Iterable[dict[str, Any]]) -> None:
-        for row in rows:
-            if self.id_column:
-                row_id = row.get(self.id_column)
-                if row_id is not None:
-                    normalized_id = str(row_id)
-                    if normalized_id in self.existing_ids:
-                        continue
-                    self.existing_ids.add(normalized_id)
-            self.buffer.append(row)
-            self.count += 1
-            if len(self.buffer) >= self.shard_size:
-                self.flush()
-
-    def flush(self) -> None:
-        if not self.buffer:
-            return
-        pd.DataFrame(self.buffer).to_parquet(self.output_dir / f"part-{self.shard_index:05d}.parquet", index=False)
-        self.buffer = []
-        self.shard_index += 1
-
-    def close(self) -> None:
-        self.flush()
-
-    def _load_existing_state(self) -> None:
-        part_files = sorted(self.output_dir.glob("part-*.parquet"))
-        if not part_files:
-            return
-        self.shard_index = _next_shard_index(part_files)
-        if self.id_column:
-            for file_path in part_files:
-                frame = pd.read_parquet(file_path, columns=[self.id_column])
-                self.count += len(frame)
-                self.existing_ids.update(str(value) for value in frame[self.id_column])
-        else:
-            self.count = sum(len(pd.read_parquet(file_path)) for file_path in part_files)
-
-
-def _next_shard_index(part_files: Sequence[Path]) -> int:
-    max_index = -1
-    for file_path in part_files:
-        try:
-            max_index = max(max_index, int(file_path.stem.removeprefix("part-")))
-        except ValueError:
-            continue
-    return max_index + 1
