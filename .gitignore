@@ -1,7 +1,7 @@
 checkpoints/
 kernel_meta/
 outputs/
-sources/
+/sources/
 logs/
 wandb.key
 

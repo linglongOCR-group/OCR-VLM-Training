@@ -16,9 +16,11 @@ from tools.data_management.config import load_processing_config
 from tools.data_management.progress import ProgressReporter
 from tools.data_management.prompts import load_prompt_config, resolve_prompt
 from tools.data_management.serializers.layout_mineru import MinerULayoutSerializer
+from tools.data_management.serializers.table_text import TableTextSerializer
 from tools.data_management.sources.adapters.hybrid_message import HybridMessageExportOptions, HybridMessageSourceAdapter
 from tools.data_management.sources.adapters.mineru import MinerUExportOptions, MinerUSourceAdapter
 from tools.data_management.sources.adapters.pubtable import PubTableExportOptions, PubTableSourceAdapter
+from tools.data_management.sources.adapters.unirec import UniRecExportOptions, UniRecSourceAdapter
 from tools.data_management.validate_grpo_view import validate_grpo_view
 from tools.data_management.views import ViewBuilder, reward_smoke_test, score_predictions, validate_view
 from tools.data_management.views.builder import _SplitParquetWriter
@@ -128,6 +130,42 @@ def _write_fake_pubtable_dataset(root: Path, samples: list[tuple[str, int, int]]
         }
     )
     pq.write_table(table, root / "part-00000.parquet")
+
+
+def _write_fake_unirec_subset(root: Path, subset: str, rows: list[dict]) -> None:
+    annotation_dir = root / subset / "annotations"
+    image_dir = root / subset / "images"
+    metadata_dir = root / subset / "metadata"
+    annotation_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    with (annotation_dir / "records.jsonl").open("w") as f:
+        for idx, row in enumerate(rows):
+            shard = row.get("shard", f"{idx:02x}")
+            filename = row["original_file_name"]
+            image_path = image_dir / shard / filename
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            image_path.write_bytes(_minimal_png(*row.get("image_size", (48, 16))))
+            payload = {
+                "record_id": row["record_id"],
+                "subset_id": subset,
+                "category": row["category"],
+                "language": row.get("language", "mixed"),
+                "document_types": row.get("document_types", []),
+                "annotation_source": "fixture",
+                "source_index": idx,
+                "size_key": row.get("size_key", "48_16"),
+                "original_file_name": filename,
+                "image_path": f"subsets/{row['category']}/{subset}/images/{shard}/{filename}",
+                "label": row["label"],
+                "label_empty": row.get("label_empty", False),
+                "raw": {"file_name": filename, "label": row["label"]},
+            }
+            if row.get("type"):
+                payload["type"] = row["type"]
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    (metadata_dir / "asset_export.json").write_text(
+        json.dumps({"subset_id": subset, "asset_dir": f"subsets/{rows[0]['category']}/{subset}/images"})
+    )
 
 
 def _export_fake_canonical(tmp_path: Path) -> Path:
@@ -519,6 +557,224 @@ def test_hybrid_message_source_reference_image_materialization_reuses_source_ima
     assert not (canonical_root / "assets" / "files" / "source=HaoY-Syn-Formula").exists()
 
 
+def test_unirec_adapter_exports_region_records_and_cleans_text_labels(tmp_path):
+    dataset_root = tmp_path
+    source_root = dataset_root / "sources" / "UniRec40M_english"
+    _write_fake_unirec_subset(
+        source_root,
+        "hiertext",
+        [
+            {
+                "record_id": "hiertext_001",
+                "category": "english",
+                "language": "en",
+                "type": "para",
+                "original_file_name": "hiertext_001.jpg",
+                "image_size": (40, 20),
+                "label": r"Area is \(x^2\)<|ln|>today<|pn|>now<<<change_line_token_wrap>>>done and \(broken",
+            }
+        ],
+    )
+    canonical_root = dataset_root / "canonical"
+
+    report = UniRecSourceAdapter(
+        UniRecExportOptions(source_root=source_root, dataset_name="UniRec40M_english")
+    ).export(canonical_root, tasks=["text", "formula", "table"])
+
+    assert report.task_records == {"text": 1}
+    assert report.documents == 1
+    assert report.pages == 1
+    assert report.regions == 1
+    assert report.assets == 2
+    text = pd.read_parquet(canonical_root / "records/text/source=UniRec40M_english/part-00000.parquet").iloc[0]
+    regions = pd.read_parquet(canonical_root / "entities/regions/source=UniRec40M_english/part-00000.parquet")
+    assets = pd.read_parquet(canonical_root / "assets/manifests/source=UniRec40M_english/part-00000.parquet")
+    crop_asset = assets[assets["asset_type"] == "region_crop"].iloc[0]
+
+    assert text["target"] == {"text": "Area is $x^2$todaynowdone and broken"}
+    assert text["task"] == "text"
+    assert text["image_asset_id"] == crop_asset["asset_id"]
+    assert crop_asset["path"] == "sources/UniRec40M_english/hiertext/images/00/hiertext_001.jpg"
+    assert list(regions.iloc[0]["bbox"]) == [0.0, 0.0, 40.0, 20.0]
+    assert regions.iloc[0]["crop_asset_id"] == crop_asset["asset_id"]
+
+
+def test_unirec_adapter_classifies_and_strips_standalone_formula_wrappers(tmp_path):
+    dataset_root = tmp_path
+    source_root = dataset_root / "sources" / "UniRec40M_formula"
+    _write_fake_unirec_subset(
+        source_root,
+        "latex_aug_formula",
+        [
+            {
+                "record_id": "latex_001",
+                "category": "formula",
+                "language": "en",
+                "original_file_name": "formula_001.jpg",
+                "image_size": (32, 12),
+                "label": r"\[ x^2 + y^2 = z^2 \]",
+            },
+            {
+                "record_id": "latex_002",
+                "category": "formula",
+                "language": "en",
+                "original_file_name": "formula_002.jpg",
+                "image_size": (30, 10),
+                "label": r"plain words and \(x\)",
+            },
+            {
+                "record_id": "latex_003",
+                "category": "formula",
+                "language": "en",
+                "original_file_name": "formula_003.jpg",
+                "image_size": (30, 10),
+                "label": r"\[\sin 0 = 1.",
+            },
+        ],
+    )
+    canonical_root = dataset_root / "canonical"
+
+    report = UniRecSourceAdapter(
+        UniRecExportOptions(source_root=source_root, dataset_name="UniRec40M_formula")
+    ).export(canonical_root, tasks=["text", "formula"])
+
+    assert report.task_records == {"formula": 2, "text": 1}
+    formula = pd.read_parquet(canonical_root / "records/formula/source=UniRec40M_formula/part-00000.parquet")
+    text = pd.read_parquet(canonical_root / "records/text/source=UniRec40M_formula/part-00000.parquet")
+
+    latex_values = {row["latex"] for row in formula["target"]}
+    assert latex_values == {"x^2 + y^2 = z^2", r"\sin 0 = 1."}
+    assert set(formula["category"]) == {"formula"}
+    assert text.iloc[0]["target"] == {"text": "plain words and $x$"}
+    assert text.iloc[0]["task"] == "text"
+
+
+def test_unirec_adapter_detects_table_records_from_metadata(tmp_path):
+    dataset_root = tmp_path
+    source_root = dataset_root / "sources" / "UniRec40M_finance_report"
+    _write_fake_unirec_subset(
+        source_root,
+        "dfcf_finance_pdf",
+        [
+            {
+                "record_id": "finance_table_001",
+                "category": "finance_report",
+                "language": "zh",
+                "document_types": ["Chinese", "table"],
+                "original_file_name": "report_table_001.jpg",
+                "image_size": (50, 30),
+                "label": "项目\t金额\n收入\t100",
+            }
+        ],
+    )
+    canonical_root = dataset_root / "canonical"
+
+    report = UniRecSourceAdapter(
+        UniRecExportOptions(source_root=source_root, dataset_name="UniRec40M_finance_report")
+    ).export(canonical_root, tasks=["text", "formula", "table"])
+
+    assert report.task_records == {"table": 1}
+    table = pd.read_parquet(canonical_root / "records/table/source=UniRec40M_finance_report/part-00000.parquet").iloc[0]
+    assert table["target"] == {"text": "项目\t金额\n收入\t100"}
+
+
+def test_unirec_adapter_preserves_duplicate_record_ids_across_subsets(tmp_path):
+    dataset_root = tmp_path
+    source_root = dataset_root / "sources" / "UniRec40M_english"
+    for subset in ("subset_a", "subset_b"):
+        _write_fake_unirec_subset(
+            source_root,
+            subset,
+            [
+                {
+                    "record_id": "duplicate_001",
+                    "category": "english",
+                    "language": "en",
+                    "original_file_name": f"{subset}.jpg",
+                    "image_size": (40, 20),
+                    "label": f"text from {subset}",
+                }
+            ],
+        )
+    canonical_root = dataset_root / "canonical"
+
+    report = UniRecSourceAdapter(
+        UniRecExportOptions(source_root=source_root, dataset_name="UniRec40M_english")
+    ).export(canonical_root, tasks=["text"])
+
+    assert report.documents == 2
+    assert report.task_records == {"text": 2}
+    docs = pd.read_parquet(canonical_root / "entities/documents/source=UniRec40M_english/part-00000.parquet")
+    text = pd.read_parquet(canonical_root / "records/text/source=UniRec40M_english/part-00000.parquet")
+    assert len(set(docs["document_id"])) == 2
+    assert sorted(row["text"] for row in text["target"]) == ["text from subset_a", "text from subset_b"]
+
+
+def test_unirec_nested_reference_view_keeps_text_formula_and_table_rows(tmp_path):
+    dataset_root = tmp_path
+    source_root = dataset_root / "sources" / "UniRec40M_mixed"
+    _write_fake_unirec_subset(
+        source_root,
+        "mixed",
+        [
+            {
+                "record_id": "text_001",
+                "category": "english",
+                "language": "en",
+                "original_file_name": "text.jpg",
+                "image_size": (40, 20),
+                "label": "plain text",
+            },
+            {
+                "record_id": "formula_001",
+                "category": "formula",
+                "language": "en",
+                "original_file_name": "formula.jpg",
+                "image_size": (40, 20),
+                "label": r"\[ x + y \]",
+            },
+            {
+                "record_id": "table_001",
+                "category": "finance_report",
+                "language": "zh",
+                "document_types": ["table"],
+                "original_file_name": "table.jpg",
+                "image_size": (40, 20),
+                "label": "项目\t金额\n收入\t100",
+            },
+        ],
+    )
+    canonical_root = dataset_root / "canonical"
+    UniRecSourceAdapter(
+        UniRecExportOptions(source_root=source_root, dataset_name="UniRec40M_mixed")
+    ).export(canonical_root, tasks=["text", "formula", "table"])
+    view_root = dataset_root / "views" / "unirec_mixed"
+    config = {
+        "name": "unirec_mixed",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [
+            {"task": "text", "sources": ["UniRec40M_mixed"]},
+            {"task": "formula", "sources": ["UniRec40M_mixed"]},
+            {"task": "table", "sources": ["UniRec40M_mixed"]},
+        ],
+        "target_serialization": {"text": "plain_text_v1", "formula": "latex_plain_v1", "table": "table_text_v1"},
+        "image_policy": {"materialization": {"mode": "nested_reference"}},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+        "shard_policy": {"rows_per_shard": 10},
+    }
+
+    report = ViewBuilder(canonical_root, view_root).build(config)
+
+    assert report.total_records == 3
+    train = pd.read_parquet(view_root / "train" / "part-00000.parquet")
+    assert sorted(train["task"].tolist()) == ["formula", "table", "text"]
+    labels_by_task = dict(zip(train["task"], train["label"], strict=True))
+    assert labels_by_task["table"] == "项目\t金额\n收入\t100"
+    assert train["images"].notna().all()
+
+
 def test_mineru_adapter_writes_spec_partitions(tmp_path):
     canonical_root = _export_fake_canonical(tmp_path)
 
@@ -620,6 +876,24 @@ def test_layout_serializer_non_uniform_stretch_to_1036():
         "<|ref_start|>table<|ref_end|>"
         "<|rotate_up|>"
     )
+
+
+def test_table_text_serializer_returns_plain_table_text():
+    record = {
+        "task": "table",
+        "target": {"text": "项目\t金额\n收入\t100"},
+    }
+
+    label = TableTextSerializer().serialize(record, {})
+
+    assert label == "项目\t金额\n收入\t100"
+
+
+def test_table_text_serializer_rejects_missing_text():
+    record = {"task": "table", "target": {"html": "<table></table>"}}
+
+    with pytest.raises(ValueError, match="requires text target"):
+        TableTextSerializer().serialize(record, {})
 
 
 def test_prompt_config_resolves_task_prompt():
@@ -1400,6 +1674,37 @@ def test_view_builder_drops_empty_label_records(tmp_path):
     assert train["task"].tolist() == ["text"]
     stats = json.loads((view_root / "stats.json").read_text())
     assert stats["filter_counts"]["empty_label"] == 2
+
+
+def test_sft_view_builder_drops_labels_with_reserved_media_tokens(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    text_path = canonical_root / "records/text/source=FakeMinerU/part-00000.parquet"
+    texts = pd.read_parquet(text_path)
+    texts.at[0, "target"] = {"text": "<video>"}
+    texts.to_parquet(text_path, index=False)
+    view_root = tmp_path / "views" / "reserved_media_token_filter"
+    config = {
+        "name": "reserved_media_token_filter",
+        "stage": "sft",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": [
+            {"task": "formula", "sources": ["FakeMinerU"]},
+            {"task": "text", "sources": ["FakeMinerU"]},
+        ],
+        "target_serialization": {"formula": "latex_plain_v1", "text": "plain_text_v1"},
+        "image_policy": {"materialization": {"mode": "embedded"}},
+        "split_policy": {"level": "document", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0},
+        "shard_policy": {"rows_per_shard": 10},
+    }
+
+    report = ViewBuilder(canonical_root, view_root).build(config)
+
+    assert report.total_records == 1
+    train = pd.read_parquet(view_root / "train" / "part-00000.parquet")
+    assert train["task"].tolist() == ["formula"]
+    stats = json.loads((view_root / "stats.json").read_text())
+    assert stats["filter_counts"]["reserved_media_token_label"] == 1
 
 
 def test_sharded_source_reference_view_uses_root_assets_and_filename_refs(tmp_path):

@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+RESERVED_MEDIA_LABEL_TOKENS = ("<image>", "<video>")
 
 from tools.data_management.canonical.reader import CanonicalReader
 from tools.data_management.config.resolver import load_processing_config, resolve_path
@@ -261,6 +262,7 @@ class ViewBuilder:
         )
         records, label_filter_counts = self._apply_label_filters(
             records,
+            stage=stage,
             progress=progress,
             num_workers=execution["num_workers"],
             worker_batch_size=execution["worker_batch_size"],
@@ -479,14 +481,20 @@ class ViewBuilder:
         self,
         records: list[dict[str, Any]],
         *,
+        stage: str,
         progress: ProgressReporter | None = None,
         num_workers: int = 1,
         worker_batch_size: int = 256,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         keep_flags: list[bool | None] = [None] * len(records)
         html_checks: list[tuple[int, str]] = []
+        reserved_media_token_count = 0
         for index, record in enumerate(records):
             target = record.get("target") or {}
+            if stage == "sft" and _record_has_reserved_media_token_label(record):
+                keep_flags[index] = False
+                reserved_media_token_count += 1
+                continue
             if (
                 record.get("task") == "table"
                 and isinstance(target, dict)
@@ -530,8 +538,10 @@ class ViewBuilder:
                             )
 
         kept = [record for record, keep in zip(records, keep_flags, strict=True) if keep]
-        empty_label_count = len(records) - len(kept)
+        empty_label_count = len(records) - len(kept) - reserved_media_token_count
         counts = {"empty_label": empty_label_count} if empty_label_count else {}
+        if reserved_media_token_count:
+            counts["reserved_media_token_label"] = reserved_media_token_count
         if progress and empty_label_count:
             progress.log(
                 "build-view",
@@ -540,6 +550,15 @@ class ViewBuilder:
                 kept=len(kept),
                 dropped=empty_label_count,
                 empty_label=empty_label_count,
+            )
+        if progress and reserved_media_token_count:
+            progress.log(
+                "build-view",
+                phase="label-filter",
+                input=len(records),
+                kept=len(kept),
+                dropped=reserved_media_token_count,
+                reserved_media_token_label=reserved_media_token_count,
             )
         return kept, counts
 
@@ -966,8 +985,29 @@ def _record_has_serializable_label(record: dict[str, Any]) -> bool:
             return bool(str(target["otsl"]))
         if target.get("html"):
             return bool(html_to_otsl(str(target["html"])))
+        if target.get("text"):
+            return bool(str(target["text"]))
         return False
     return True
+
+
+def _record_has_reserved_media_token_label(record: dict[str, Any]) -> bool:
+    target = record.get("target") or {}
+    if not isinstance(target, dict):
+        return False
+    task = record.get("task")
+    if task == "text":
+        values = [target.get("text")]
+    elif task == "formula":
+        values = [target.get("latex")]
+    elif task == "table":
+        values = [target.get("enhanced_otsl"), target.get("otsl"), target.get("html"), target.get("text")]
+    else:
+        values = []
+    return any(
+        isinstance(value, str) and any(token in value for token in RESERVED_MEDIA_LABEL_TOKENS)
+        for value in values
+    )
 
 
 def _reward_profile_for_task(config: dict[str, Any], task: str) -> str:
