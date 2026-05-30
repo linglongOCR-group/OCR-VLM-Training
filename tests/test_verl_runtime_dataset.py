@@ -134,6 +134,53 @@ def test_ocr_sft_dataset_builds_messages_without_mutating_source_columns(tmp_pat
     assert messages[0]["content"][1]["type"] == "image"
 
 
+def test_ocr_sft_dataset_preserves_literal_media_tokens_in_assistant_text(tmp_path):
+    dataset = object.__new__(OcrMultiTurnSFTDataset)
+    dataset.messages_key = "messages"
+    dataset.image_key = "runtime_images"
+    dataset.video_key = "videos"
+    dataset.processor = object()
+    dataset.image_patch_size = 14
+    dataset.data_root = tmp_path
+
+    image = _png_bytes()
+    row = {
+        "messages": [
+            {"role": "user", "content": "Read this <image>."},
+            {"role": "assistant", "content": "<video>"},
+        ],
+        "images_bytes": [image],
+    }
+
+    messages = dataset._build_messages(row)
+
+    assert messages[0]["content"][1]["type"] == "image"
+    assert messages[1]["content"] == [{"type": "text", "text": "<video>"}]
+
+
+def test_ocr_sft_dataset_does_not_rewrite_existing_sentinel_text(tmp_path):
+    dataset = object.__new__(OcrMultiTurnSFTDataset)
+    dataset.messages_key = "messages"
+    dataset.image_key = "runtime_images"
+    dataset.video_key = "videos"
+    dataset.processor = object()
+    dataset.image_patch_size = 14
+    dataset.data_root = tmp_path
+
+    image = _png_bytes()
+    row = {
+        "messages": [
+            {"role": "user", "content": "Read this <image>."},
+            {"role": "assistant", "content": "__ocr_literal_video_token__"},
+        ],
+        "images_bytes": [image],
+    }
+
+    messages = dataset._build_messages(row)
+
+    assert messages[1]["content"] == [{"type": "text", "text": "__ocr_literal_video_token__"}]
+
+
 def _png_bytes() -> bytes:
     buffer = BytesIO()
     Image.new("RGB", (4, 4), color=(1, 2, 3)).save(buffer, format="PNG")

@@ -1,0 +1,12 @@
+dataset_name: UniRec40M_education
+description: UniRec40M education-region recognition crops.
+source_path: sources/UniRec40M_education
+canonical_output: canonical
+adapter: unirec
+annotation_format: Nested subset JSONL records with source-referenced crop images.
+supported_tasks: [text, formula, table]
+export_tasks: [text, formula, table]
+image_materialization: source_reference
+shard_size: 10000
+skip_errors: false
+allow_unreadable_images: false

@@ -5,6 +5,7 @@ from tools.data_management.sources.adapters.hybrid_message import (
 )
 from tools.data_management.sources.adapters.mineru import MinerUExportOptions, MinerUSourceAdapter
 from tools.data_management.sources.adapters.pubtable import (PubTableExportOptions, PubTableSourceAdapter)
+from tools.data_management.sources.adapters.unirec import UniRecExportOptions, UniRecSourceAdapter
 
 __all__ = [
     "HybridMessageExportOptions",
@@ -14,4 +15,6 @@ __all__ = [
     "PubTableExportOptions",
     "PubTableSourceAdapter",
     "SourceAdapter",
+    "UniRecExportOptions",
+    "UniRecSourceAdapter",
 ]
