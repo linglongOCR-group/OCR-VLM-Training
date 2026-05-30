@@ -1,0 +1,4 @@
+interface:
+  display_name: "Data Management"
+  short_description: "Manage, validate, and deploy OCR VLM datasets"
+  default_prompt: "Use $data-management to inspect a dataset source, export canonical records/assets, build or validate the appropriate view workflow, and deploy view assets when needed."
