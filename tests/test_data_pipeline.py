@@ -571,7 +571,10 @@ def test_unirec_adapter_exports_region_records_and_cleans_text_labels(tmp_path):
                 "type": "para",
                 "original_file_name": "hiertext_001.jpg",
                 "image_size": (40, 20),
-                "label": r"Area is \(x^2\)<|ln|>today<|pn|>now<<<change_line_token_wrap>>>done and \(broken",
+                "label": (
+                    r"Area is \(x^2\)<|ln|>today<|pn|>now<<<change_line_token_wrap>>>"
+                    r"done and \(broken. Escaped formula is \$y+1\$"
+                ),
             }
         ],
     )
@@ -591,7 +594,8 @@ def test_unirec_adapter_exports_region_records_and_cleans_text_labels(tmp_path):
     assets = pd.read_parquet(canonical_root / "assets/manifests/source=UniRec40M_english/part-00000.parquet")
     crop_asset = assets[assets["asset_type"] == "region_crop"].iloc[0]
 
-    assert text["target"] == {"text": "Area is $x^2$todaynowdone and broken"}
+    assert text["target"] == {"text": "Area is $x^2$todaynowdone and broken. Escaped formula is $y+1$"}
+    assert r"\$" not in text["target"]["text"]
     assert text["task"] == "text"
     assert text["image_asset_id"] == crop_asset["asset_id"]
     assert crop_asset["path"] == "sources/UniRec40M_english/hiertext/images/00/hiertext_001.jpg"
@@ -663,7 +667,7 @@ def test_unirec_adapter_detects_table_records_from_metadata(tmp_path):
                 "document_types": ["Chinese", "table"],
                 "original_file_name": "report_table_001.jpg",
                 "image_size": (50, 30),
-                "label": "项目\t金额\n收入\t100",
+                "label": "项目\t公式\n收入\t" + r"\$x^2\$",
             }
         ],
     )
@@ -675,7 +679,8 @@ def test_unirec_adapter_detects_table_records_from_metadata(tmp_path):
 
     assert report.task_records == {"table": 1}
     table = pd.read_parquet(canonical_root / "records/table/source=UniRec40M_finance_report/part-00000.parquet").iloc[0]
-    assert table["target"] == {"text": "项目\t金额\n收入\t100"}
+    assert table["target"] == {"text": "项目\t公式\n收入\t$x^2$"}
+    assert r"\$" not in table["target"]["text"]
 
 
 def test_unirec_adapter_preserves_duplicate_record_ids_across_subsets(tmp_path):
@@ -740,7 +745,7 @@ def test_unirec_nested_reference_view_keeps_text_formula_and_table_rows(tmp_path
                 "document_types": ["table"],
                 "original_file_name": "table.jpg",
                 "image_size": (40, 20),
-                "label": "项目\t金额\n收入\t100",
+                "label": "项目\t公式\n收入\t" + r"\$x^2\$",
             },
         ],
     )
@@ -771,7 +776,8 @@ def test_unirec_nested_reference_view_keeps_text_formula_and_table_rows(tmp_path
     train = pd.read_parquet(view_root / "train" / "part-00000.parquet")
     assert sorted(train["task"].tolist()) == ["formula", "table", "text"]
     labels_by_task = dict(zip(train["task"], train["label"], strict=True))
-    assert labels_by_task["table"] == "项目\t金额\n收入\t100"
+    assert labels_by_task["table"] == "项目\t公式\n收入\t$x^2$"
+    assert r"\$" not in labels_by_task["table"]
     assert train["images"].notna().all()
 
 

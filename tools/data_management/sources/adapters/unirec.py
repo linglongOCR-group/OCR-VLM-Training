@@ -31,6 +31,7 @@ DEFAULT_TASKS = ("text", "formula", "table")
 NEWLINE_TOKENS = ("<|ln|>", "<|pn|>", "<|sn|>", "<<<change_line_token_wrap>>>")
 TABLE_HINT_RE = re.compile(r"\b(table|tabular|tbl|cell|row|column|col)\b", re.IGNORECASE)
 INLINE_FORMULA_RE = re.compile(r"\\\((.*?)\\\)", re.DOTALL)
+ESCAPED_DOLLAR_FORMULA_RE = re.compile(r"\\\$(.*?)\\\$", re.DOTALL)
 DISPLAY_FORMULA_RE = re.compile(r"^\s*(?:\\\[(?P<bracket>.*?)\\\]|\$\$(?P<dollar>.*?)\$\$)\s*$", re.DOTALL)
 LATEX_SIGNAL_RE = re.compile(
     r"(\\[a-zA-Z]+|[_^{}]|\\frac|\\sum|\\int|\\mathrm|\\left|\\right|\\begin|\\end)"
@@ -405,6 +406,7 @@ def clean_unirec_text(value: str) -> str:
     for token in NEWLINE_TOKENS:
         value = value.replace(token, "")
     value = INLINE_FORMULA_RE.sub(lambda match: f"${match.group(1).strip()}$", value)
+    value = ESCAPED_DOLLAR_FORMULA_RE.sub(lambda match: f"${match.group(1).strip()}$", value)
     return value.replace(r"\(", "").replace(r"\)", "").strip()
 
 
