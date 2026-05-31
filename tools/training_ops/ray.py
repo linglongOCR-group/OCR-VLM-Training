@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tools.training_ops.config import RunContext, command_with_env
-from tools.training_ops.inventory import Node
+from tools.training_ops.inventory import SelectedNode
 
 
 @dataclass(frozen=True)
 class NodeCommand:
-    node: Node
+    node: SelectedNode
     label: str
     command: str
 

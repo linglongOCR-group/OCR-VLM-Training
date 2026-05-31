@@ -28,7 +28,7 @@ def build_sft_launches(context: RunContext, *, project_root: str | None = None, 
         env = context.effective_env(node=node, project_root=root)
         command = command_with_env(env, "cd $PROJECT_ROOT && bash scripts/train/run_multinode_sft_new.sh", context.extra_args())
         if background:
-            command = f"nohup {command} > {sft_background_log_path(root, node.rank)} 2>&1 &"
+            command = f"nohup {command} > {sft_background_log_path(root, node.run_rank)} 2>&1 &"
         commands.append(NodeCommand(node, "launch-sft", command))
     return commands
 
@@ -51,7 +51,7 @@ def launch_metadata(
     if background and mode == "grpo":
         background_log_paths = [grpo_background_log_path(root)]
     elif background:
-        background_log_paths = [sft_background_log_path(root, command.node.rank) for command in commands]
+        background_log_paths = [sft_background_log_path(root, command.node.run_rank) for command in commands]
     return {
         "run_id": context.run_id,
         "release_id": context.release_id,
@@ -62,5 +62,6 @@ def launch_metadata(
         "effective_env": context.effective_env(project_root=root),
         "extra_args": context.extra_args(),
         "target_nodes": [command.node.name for command in commands],
+        "run_ranks": {node.name: node.run_rank for node in context.selected_nodes},
         "commands": [{"node": command.node.name, "label": command.label, "command": command.command} for command in commands],
     }

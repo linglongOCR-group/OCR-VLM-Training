@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tools.training_ops.errors import CommandExecutionError
-from tools.training_ops.inventory import Node
+from tools.training_ops.inventory import SelectedNode
 from tools.training_ops.state import CommandRecord, OpsState, utc_now
 
 
@@ -22,18 +22,18 @@ class Executor:
         self.state = state
         self.dry_run = dry_run
 
-    def host(self, node: Node, label: str, command: str, *, allow_failure: bool = False) -> ExecutionResult:
+    def host(self, node: SelectedNode, label: str, command: str, *, allow_failure: bool = False) -> ExecutionResult:
         argv = ["ssh", node.ssh_target, command]
         return self._run(node, label, command, argv, container=None, allow_failure=allow_failure)
 
-    def container(self, node: Node, label: str, command: str, *, allow_failure: bool = False) -> ExecutionResult:
+    def container(self, node: SelectedNode, label: str, command: str, *, allow_failure: bool = False) -> ExecutionResult:
         remote_command = shlex.join(["docker", "exec", node.container, "bash", "-lc", command])
         argv = ["ssh", node.ssh_target, remote_command]
         return self._run(node, label, remote_command, argv, container=node.container, allow_failure=allow_failure)
 
     def container_stream(
         self,
-        node: Node,
+        node: SelectedNode,
         label: str,
         command: str,
         input_path: Path,
@@ -55,7 +55,7 @@ class Executor:
 
     def host_stream(
         self,
-        node: Node,
+        node: SelectedNode,
         label: str,
         command: str,
         input_path: Path,
@@ -76,7 +76,7 @@ class Executor:
 
     def _run(
         self,
-        node: Node,
+        node: SelectedNode,
         label: str,
         command: str,
         argv: list[str],
@@ -108,7 +108,8 @@ class Executor:
             label=label,
             node=node.name,
             host=node.host,
-            rank=node.rank,
+            run_rank=node.run_rank,
+            rank=node.run_rank,
             container=container,
             command=command,
             argv=argv,

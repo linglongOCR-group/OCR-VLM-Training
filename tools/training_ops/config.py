@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 
 from tools.training_ops.errors import ConfigError
-from tools.training_ops.inventory import Inventory, Node, parse_inventory, select_nodes
+from tools.training_ops.inventory import Inventory, SelectedNode, parse_inventory, select_nodes
 
 
 @dataclass(frozen=True)
@@ -20,7 +20,7 @@ class RunContext:
     run_payload: dict[str, Any]
     inventory_payload: dict[str, Any]
     inventory: Inventory
-    selected_nodes: tuple[Node, ...]
+    selected_nodes: tuple[SelectedNode, ...]
 
     @property
     def run(self) -> dict[str, Any]:
@@ -47,7 +47,12 @@ class RunContext:
         return dict(self.run.get("training") or {})
 
     @property
-    def head_node(self) -> Node:
+    def head_node(self) -> SelectedNode:
+        head_name = self.run.get("head_node")
+        if head_name:
+            for node in self.selected_nodes:
+                if node.name == head_name:
+                    return node
         return self.selected_nodes[0]
 
     @property
@@ -62,10 +67,11 @@ class RunContext:
             return f"{root.rstrip('/')}/{self.release_id}"
         return str(deployment.get("current_link") or self.inventory.shared_paths.get("code_root") or self.repo_root)
 
-    def effective_env(self, *, node: Node | None = None, project_root: str | None = None) -> dict[str, str]:
+    def effective_env(self, *, node: SelectedNode | None = None, project_root: str | None = None) -> dict[str, str]:
         paths = self.paths
         training_env = dict((self.training.get("env") or {}))
         env: dict[str, str] = {str(key): str(value) for key, value in training_env.items()}
+        env.pop("NODE_RANK", None)
         root = project_root or self.project_root()
         env.update(
             {
@@ -94,8 +100,8 @@ class RunContext:
                 env["VAL_FILES"] = str(paths.get("val_file"))
             env["MASTER_ADDR"] = str(self.training.get("master_addr", self.head_node.host_ip))
             env["MASTER_PORT"] = str(self.training.get("master_port", 29500))
-        if node is not None:
-            env["NODE_RANK"] = str(node.rank)
+        if node is not None and self.mode == "sft":
+            env["NODE_RANK"] = str(node.run_rank)
             env["TRAIN_IFACE"] = node.train_iface
         return env
 
@@ -109,7 +115,7 @@ class RunContext:
             "release_id": self.release_id,
             "run_config_path": str(self.run_config_path),
             "inventory_path": str(self.inventory_path),
-            "selected_nodes": [node.name for node in self.selected_nodes],
+            "selected_nodes": [node.to_dict() for node in self.selected_nodes],
             "head_node": self.head_node.name,
             "effective_env": self.effective_env(),
         }
@@ -140,6 +146,9 @@ def load_run_context(run_config_path: str | Path, *, repo_root: str | Path | Non
     selected = select_nodes(inventory, list(run.get("nodes") or []))
     if not selected:
         raise ConfigError("run must select at least one node")
+    head_node = run.get("head_node")
+    if head_node is not None and str(head_node) not in {node.name for node in selected}:
+        raise ConfigError(f"run.head_node must be one of selected nodes: {head_node}")
     context = RunContext(
         repo_root=repo_root_path,
         run_config_path=run_config_path,

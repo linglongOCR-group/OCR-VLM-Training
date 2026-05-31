@@ -10,6 +10,7 @@ Use this skill when deploying or launching OCR-VLM training on Atlas 800T A2 nod
 ## Safety Rules
 
 - Use `scripts/trainops --run <run.yaml> preflight` before deployment or launch.
+- Treat `run.nodes` order as the active run topology: SFT `NODE_RANK` is derived from this order, while GRPO/Ray uses the selected head address and does not need `NODE_RANK`.
 - Package the current working tree with `scripts/trainops --run <run.yaml> package`; review the package manifest before deploying when excludes changed.
 - Do not start SSHD inside containers. All container commands go through host SSH plus `docker exec`.
 - Assume `verl-vlm-grpo` containers already exist and are running unless the user explicitly expands scope.

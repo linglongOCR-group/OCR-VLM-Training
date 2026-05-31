@@ -13,7 +13,7 @@ from tools.training_ops.config import load_run_context
 from tools.training_ops.deploy import deploy_shared, deploy_tmp
 from tools.training_ops.errors import CommandExecutionError
 from tools.training_ops.executor import Executor, FakeExecutor
-from tools.training_ops.launch import build_grpo_launches, build_sft_launches
+from tools.training_ops.launch import build_grpo_launches, build_sft_launches, launch_metadata
 from tools.training_ops.package import create_package
 from tools.training_ops.preflight import run_preflight
 from tools.training_ops.ray import build_ray_head_command, build_ray_worker_commands
@@ -38,14 +38,12 @@ def _write_inventory(path: Path) -> None:
                         {
                             "name": "node0",
                             "host": "atlas-a2-00",
-                            "rank": 0,
                             "host_ip": "10.0.0.10",
                             "train_iface": "bond0",
                         },
                         {
                             "name": "node1",
                             "host": "atlas-a2-01",
-                            "rank": 1,
                             "host_ip": "10.0.0.11",
                             "train_iface": "bond0",
                             "container": "custom-verl",
@@ -96,6 +94,50 @@ def _write_run(path: Path, inventory: Path, *, mode: str = "grpo", deploy_method
     )
 
 
+def _write_four_node_inventory(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "cluster": {
+                    "name": "atlas-a2-four-node-test",
+                    "ssh_user": "root",
+                    "default_container": "verl-vlm-grpo",
+                    "shared_paths": {
+                        "code_root": "/mnt/shared/ocr-vlm-training",
+                        "ops_state_root": "/mnt/shared/ocr-vlm-training-runs",
+                    },
+                    "nodes": [
+                        {"name": f"node{index}", "host": f"atlas-a2-0{index}", "host_ip": f"10.0.0.1{index}", "train_iface": "bond0"}
+                        for index in range(4)
+                    ],
+                }
+            },
+            sort_keys=False,
+        )
+    )
+
+
+def _write_subset_run(
+    path: Path,
+    inventory: Path,
+    *,
+    mode: str = "sft",
+    nodes: list[str] | None = None,
+    head_node: str | None = None,
+) -> None:
+    _write_run(path, inventory, mode=mode)
+    payload = yaml.safe_load(path.read_text())
+    payload["run"]["nodes"] = nodes or ["node2", "node3"]
+    if head_node is not None:
+        payload["run"]["head_node"] = head_node
+    run = payload["run"]
+    run["paths"]["model_path"] = "/mnt/models/MinerU2.5"
+    run["paths"]["train_file"] = "/mnt/data/train.parquet"
+    run["paths"]["val_file"] = "/mnt/data/val.parquet"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+
 def test_load_run_context_resolves_inventory_nodes_and_effective_env(tmp_path: Path) -> None:
     inventory = tmp_path / "inventory.yaml"
     run = tmp_path / "run.yaml"
@@ -111,6 +153,54 @@ def test_load_run_context_resolves_inventory_nodes_and_effective_env(tmp_path: P
     assert context.effective_env()["MODEL_PATH"] == "/mnt/models/MinerU2.5"
     assert context.effective_env()["NNODES"] == "2"
     assert context.effective_env()["RAY_ADDRESS"] == "auto"
+
+
+def test_load_run_context_derives_run_ranks_from_selected_node_order(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_four_node_inventory(inventory)
+    _write_subset_run(run, inventory, nodes=["node2", "node3"])
+
+    context = load_run_context(run, repo_root=tmp_path)
+
+    assert [node.name for node in context.selected_nodes] == ["node2", "node3"]
+    assert [node.run_rank for node in context.selected_nodes] == [0, 1]
+    assert context.head_node.name == "node2"
+
+
+def test_load_run_context_accepts_selected_head_node_override(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_four_node_inventory(inventory)
+    _write_subset_run(run, inventory, nodes=["node2", "node3"], head_node="node3")
+
+    context = load_run_context(run, repo_root=tmp_path)
+
+    assert context.head_node.name == "node3"
+    assert context.head_node.run_rank == 1
+
+
+@pytest.mark.parametrize(
+    ("nodes", "head_node", "match"),
+    [
+        (["node2", "node2"], None, "duplicate"),
+        (["node2", "missing"], None, "unknown"),
+        (["node2", "node3"], "node1", "head_node"),
+    ],
+)
+def test_load_run_context_validates_selected_nodes_and_head_node(
+    tmp_path: Path,
+    nodes: list[str],
+    head_node: str | None,
+    match: str,
+) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_four_node_inventory(inventory)
+    _write_subset_run(run, inventory, nodes=nodes, head_node=head_node)
+
+    with pytest.raises(ValueError, match=match):
+        load_run_context(run, repo_root=tmp_path)
 
 
 def test_load_run_context_rejects_missing_required_fields(tmp_path: Path) -> None:
@@ -310,6 +400,96 @@ def test_ray_and_launch_command_builders_render_expected_scripts(tmp_path: Path)
     assert "cd $PROJECT_ROOT && bash scripts/train/run_multinode_sft_new.sh" in sft[0].command
     assert "NODE_RANK=1" in sft[1].command
     assert "MASTER_ADDR=10.0.0.10" in sft[1].command
+
+
+def test_subset_sft_launch_uses_contiguous_derived_run_ranks(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_four_node_inventory(inventory)
+    _write_subset_run(run, inventory, mode="sft", nodes=["node2", "node3"])
+    context = load_run_context(run, repo_root=tmp_path)
+
+    sft = build_sft_launches(context, project_root="/mnt/shared/ocr-vlm-training/current")
+
+    assert [command.node.name for command in sft] == ["node2", "node3"]
+    assert "NODE_RANK=0" in sft[0].command
+    assert "NODE_RANK=1" in sft[1].command
+    assert "NNODES=2" in sft[0].command
+    assert "NNODES=2" in sft[1].command
+    assert "MASTER_ADDR=10.0.0.12" in sft[1].command
+
+
+def test_grpo_and_ray_commands_do_not_render_node_rank(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_four_node_inventory(inventory)
+    _write_subset_run(run, inventory, mode="grpo", nodes=["node2", "node3"])
+    payload = yaml.safe_load(run.read_text())
+    payload["run"]["training"]["env"]["NODE_RANK"] = 99
+    run.write_text(yaml.safe_dump(payload, sort_keys=False))
+    context = load_run_context(run, repo_root=tmp_path)
+
+    commands = [
+        build_ray_head_command(context).command,
+        *[command.command for command in build_ray_worker_commands(context)],
+        *[command.command for command in build_grpo_launches(context, project_root="/mnt/shared/ocr-vlm-training/current")],
+    ]
+
+    assert all("NODE_RANK" not in command for command in commands)
+    assert "NODE_RANK" not in context.effective_env()
+    assert "RAY_HEAD_ADDRESS=10.0.0.12:6379" in commands[1]
+    assert launch_metadata(context, project_root="/mnt/shared/ocr-vlm-training/current")["run_ranks"] == {"node2": 0, "node3": 1}
+
+
+def test_inventory_cli_outputs_selected_nodes_with_run_ranks(tmp_path: Path, capsys) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_four_node_inventory(inventory)
+    _write_subset_run(run, inventory, mode="sft", nodes=["node2", "node3"])
+
+    trainops_main(["--run", str(run), "--repo-root", str(tmp_path), "inventory"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["nodes"] == [
+        {
+            "name": "node2",
+            "host": "atlas-a2-02",
+            "host_ip": "10.0.0.12",
+            "train_iface": "bond0",
+            "ssh_user": "root",
+            "container": "verl-vlm-grpo",
+            "run_rank": 0,
+        },
+        {
+            "name": "node3",
+            "host": "atlas-a2-03",
+            "host_ip": "10.0.0.13",
+            "train_iface": "bond0",
+            "ssh_user": "root",
+            "container": "verl-vlm-grpo",
+            "run_rank": 1,
+        },
+    ]
+
+
+def test_command_records_store_derived_run_rank_with_node_identity(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_four_node_inventory(inventory)
+    _write_subset_run(run, inventory, mode="sft", nodes=["node2", "node3"])
+    context = load_run_context(run, repo_root=tmp_path)
+    state = OpsState.create(context, root=tmp_path / "ops")
+    executor = FakeExecutor(state)
+
+    executor.host(context.selected_nodes[1], "check", "true")
+
+    record = executor.commands[0]
+    assert record.node == "node3"
+    assert record.host == "atlas-a2-03"
+    assert record.run_rank == 1
+    saved = json.loads((state.root / "commands.jsonl").read_text())
+    assert saved["node"] == "node3"
+    assert saved["run_rank"] == 1
 
 
 def test_preflight_required_path_checks_are_strict_and_quoted(tmp_path: Path) -> None:

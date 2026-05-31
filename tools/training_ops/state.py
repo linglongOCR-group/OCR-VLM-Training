@@ -16,6 +16,7 @@ class CommandRecord:
     label: str
     node: str
     host: str
+    run_rank: int
     rank: int
     container: str | None
     command: str

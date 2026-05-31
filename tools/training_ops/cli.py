@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.command == "inventory":
         context = _context(args)
-        print(json.dumps({"cluster": context.inventory.name, "nodes": [node.__dict__ for node in context.selected_nodes]}, indent=2))
+        print(json.dumps({"cluster": context.inventory.name, "nodes": [node.to_dict() for node in context.selected_nodes]}, indent=2))
         return
     if args.command == "logs":
         context = _context(args)

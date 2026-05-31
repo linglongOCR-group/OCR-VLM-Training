@@ -10,7 +10,6 @@ from tools.training_ops.errors import ConfigError
 class Node:
     name: str
     host: str
-    rank: int
     host_ip: str
     train_iface: str
     ssh_user: str
@@ -19,6 +18,56 @@ class Node:
     @property
     def ssh_target(self) -> str:
         return f"{self.ssh_user}@{self.host}" if self.ssh_user else self.host
+
+
+@dataclass(frozen=True)
+class SelectedNode:
+    node: Node
+    run_rank: int
+
+    @property
+    def name(self) -> str:
+        return self.node.name
+
+    @property
+    def host(self) -> str:
+        return self.node.host
+
+    @property
+    def host_ip(self) -> str:
+        return self.node.host_ip
+
+    @property
+    def train_iface(self) -> str:
+        return self.node.train_iface
+
+    @property
+    def ssh_user(self) -> str:
+        return self.node.ssh_user
+
+    @property
+    def container(self) -> str:
+        return self.node.container
+
+    @property
+    def ssh_target(self) -> str:
+        return self.node.ssh_target
+
+    @property
+    def rank(self) -> int:
+        """Compatibility alias for callers that still read command rank."""
+        return self.run_rank
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "host": self.host,
+            "host_ip": self.host_ip,
+            "train_iface": self.train_iface,
+            "ssh_user": self.ssh_user,
+            "container": self.container,
+            "run_rank": self.run_rank,
+        }
 
 
 @dataclass(frozen=True)
@@ -41,15 +90,19 @@ def parse_inventory(payload: dict[str, Any]) -> Inventory:
     if not raw_nodes:
         raise ConfigError("inventory requires cluster.nodes")
     nodes: list[Node] = []
+    names: set[str] = set()
     for raw in raw_nodes:
-        missing = [field for field in ("name", "host", "rank", "host_ip", "train_iface") if field not in raw]
+        missing = [field for field in ("name", "host", "host_ip", "train_iface") if field not in raw]
         if missing:
             raise ConfigError(f"inventory node missing required fields: {', '.join(missing)}")
+        name = str(raw["name"])
+        if name in names:
+            raise ConfigError(f"inventory contains duplicate node name: {name}")
+        names.add(name)
         nodes.append(
             Node(
-                name=str(raw["name"]),
+                name=name,
                 host=str(raw["host"]),
-                rank=int(raw["rank"]),
                 host_ip=str(raw["host_ip"]),
                 train_iface=str(raw["train_iface"]),
                 ssh_user=str(raw.get("ssh_user", ssh_user)),
@@ -60,16 +113,19 @@ def parse_inventory(payload: dict[str, Any]) -> Inventory:
         name=str(cluster.get("name", "cluster")),
         ssh_user=ssh_user,
         default_container=default_container,
-        nodes=tuple(sorted(nodes, key=lambda node: node.rank)),
+        nodes=tuple(nodes),
         shared_paths=dict(cluster.get("shared_paths") or {}),
     )
 
 
-def select_nodes(inventory: Inventory, names: list[str] | None) -> tuple[Node, ...]:
+def select_nodes(inventory: Inventory, names: list[str] | None) -> tuple[SelectedNode, ...]:
     if not names:
-        return inventory.nodes
+        return tuple(SelectedNode(node, run_rank=index) for index, node in enumerate(inventory.nodes))
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ConfigError(f"run selected duplicate inventory nodes: {', '.join(duplicates)}")
     by_name = inventory.by_name()
     missing = [name for name in names if name not in by_name]
     if missing:
         raise ConfigError(f"run selected unknown inventory nodes: {', '.join(missing)}")
-    return tuple(sorted((by_name[name] for name in names), key=lambda node: node.rank))
+    return tuple(SelectedNode(by_name[name], run_rank=index) for index, name in enumerate(names))
