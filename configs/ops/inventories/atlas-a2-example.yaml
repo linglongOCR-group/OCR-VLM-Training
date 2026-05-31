@@ -1,0 +1,18 @@
+cluster:
+  name: atlas-a2-example
+  ssh_user: root
+  default_container: verl-vlm-grpo
+  shared_paths:
+    code_root: /mnt/shared/ocr-vlm-training
+    ops_state_root: /mnt/shared/ocr-vlm-training-runs
+  nodes:
+    - name: node0
+      host: atlas-a2-00
+      rank: 0
+      host_ip: 10.0.0.10
+      train_iface: bond0
+    - name: node1
+      host: atlas-a2-01
+      rank: 1
+      host_ip: 10.0.0.11
+      train_iface: bond0

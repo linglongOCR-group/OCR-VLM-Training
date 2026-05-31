@@ -3,9 +3,7 @@
 ## Purpose
 
 This specification defines the multi-node SFT and GRPO training system for OCR VLM fine-tuning. It covers training execution, W&B experiment tracking, checkpoint lifecycle, resume behavior, and configuration. The system uses VERL as the training framework, Ray for multi-node orchestration, W&B for tracking, and local or mounted shared filesystem for checkpoint storage.
-
 ## Requirements
-
 ### Requirement: Multi-Node SFT Training
 
 The system SHALL launch multi-node SFT training jobs from configuration without code edits, using distributed coordination appropriate to the installed training framework.
@@ -302,3 +300,22 @@ SFT and GRPO training modes SHALL share common infrastructure for dataset format
 - **WHEN** a checkpoint is saved in either SFT or GRPO mode
 - **THEN** the checkpoint directory follows the same structure under CKPTS_DIR
 - **AND** the same resume logic applies regardless of training mode
+
+### Requirement: Preserve Literal Assistant Media Tokens
+
+The SFT runtime dataset wrapper SHALL preserve literal media-token text in non-user messages without allowing it to be interpreted as a multimodal placeholder.
+
+#### Scenario: Assistant text contains `<video>`
+
+- GIVEN an SFT row whose user message contains an image placeholder
+- AND whose assistant text contains the literal string `<video>`
+- WHEN the runtime dataset builds VERL multi-turn messages
+- THEN the user image placeholder SHALL still become an image segment
+- AND the assistant message SHALL remain a text segment containing `<video>`
+
+#### Scenario: Assistant text contains `<image>`
+
+- GIVEN an SFT row whose assistant text contains the literal string `<image>`
+- WHEN the runtime dataset builds VERL multi-turn messages
+- THEN the assistant text SHALL remain text and SHALL NOT create an additional image segment
+

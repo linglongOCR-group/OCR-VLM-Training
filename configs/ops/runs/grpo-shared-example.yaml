@@ -1,0 +1,26 @@
+run:
+  id: grpo-shared-example
+  mode: grpo
+  inventory: ../inventories/atlas-a2-example.yaml
+  nodes:
+    - node0
+    - node1
+  deployment:
+    method: shared
+    release_id: grpo-shared-example
+    release_root: /mnt/shared/ocr-vlm-training/releases
+    current_link: /mnt/shared/ocr-vlm-training/current
+  paths:
+    model_path: /mnt/models/MinerU2.5
+    train_file: /mnt/data/views/grpo/train.parquet
+    val_file: /mnt/data/views/grpo/val.parquet
+    ckpts_dir: /mnt/ckpts/ocr-vlm/grpo-shared-example
+    ocr_data_root: /mnt/data
+  training:
+    ray_port: 6379
+    env:
+      NPUS_PER_NODE: 8
+      WANDB_MODE: offline
+      WANDB_PROJECT: ocr-vlm-training
+      EXPERIMENT_NAME: grpo-shared-example
+    args: []
