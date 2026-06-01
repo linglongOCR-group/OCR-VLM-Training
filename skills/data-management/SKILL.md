@@ -97,6 +97,14 @@ assets into the view. Use `source_reference` when view parquet should carry
 dataset-relative source asset paths. In both cases, validate with
 `validate-view --require-images` when image reachability matters.
 
+## Ablation View Build Notes
+
+For MinerU2.5 SFT ablations that isolate a target dataset while preserving the prior text/formula/table mix, prefer one deterministic `nested_reference` view per target. Use stable seeds, explicit `sample:` caps for balancing sources, and train-only splits when the view is intended only for SFT training. Existing canonical naming may differ from the user-facing dataset name: the Fintech Annual reports canonical source used in this repo is `Fintech_Annual_Reports_fixed`, even when the user says `Fintech_Annual`.
+
+Large view builds can spend many minutes in a `.tmp` directory (for example `views/<name>/train.tmp`) before atomically renaming to `train`. Treat `.tmp` shards as in-progress only: do not launch training, count the view as complete, or summarize final counts until `train/` exists and `validate-view` has succeeded. It is safe to prepare training configs or deploy code while a view is building, but launch must wait for the finalized view path.
+
+When confirming requested sample counts, use the built parquet columns (`source_name`, `task`, `split`) and report approximate counts because filtering/split behavior can produce deviations from requested caps after HTML-label filtering, aspect-ratio filtering, split assignment, or because the canonical source has fewer usable rows than the user-facing nominal count. If a long sequential build/validate process is interrupted or needs to be split, do not restart completed views; resume at the first incomplete view and avoid duplicate `validate-view` processes before launching dependent jobs.
+
 ## References
 
 Read `references/ocr-vlm-data-management.md` when the task involves concrete OCR VLM dataset operations, expected layouts, validation commands, source/canonical/view schemas, UniRec40M exports, reserved media-token failures, or view deployment.
