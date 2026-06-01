@@ -4,6 +4,7 @@ outputs/
 /sources/
 logs/
 wandb.key
+/artifacts/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
