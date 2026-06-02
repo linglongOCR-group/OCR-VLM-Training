@@ -13,7 +13,7 @@ from tools.training_ops.config import load_run_context
 from tools.training_ops.deploy import deploy_shared, deploy_tmp
 from tools.training_ops.errors import CommandExecutionError
 from tools.training_ops.executor import Executor, FakeExecutor
-from tools.training_ops.launch import build_grpo_launches, build_sft_launches, launch_metadata
+from tools.training_ops.launch import build_grpo_launches, build_kd_sft_launches, build_sft_launches, launch_metadata
 from tools.training_ops.package import create_package
 from tools.training_ops.preflight import run_preflight
 from tools.training_ops.ray import build_ray_head_command, build_ray_worker_commands
@@ -402,6 +402,36 @@ def test_ray_and_launch_command_builders_render_expected_scripts(tmp_path: Path)
     assert "MASTER_ADDR=10.0.0.10" in sft[1].command
 
 
+
+def test_kd_sft_launch_uses_teacher_model_path_and_multinode_script(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_inventory(inventory)
+    _write_run(run, inventory, mode="kd_sft")
+    payload = yaml.safe_load(run.read_text())
+    payload["run"]["paths"]["teacher_model_path"] = "/mnt/models/MinerU2.5-teacher"
+    run.write_text(yaml.safe_dump(payload, sort_keys=False))
+    context = load_run_context(run, repo_root=tmp_path)
+
+    commands = build_kd_sft_launches(context, project_root="/mnt/shared/ocr-vlm-training/current")
+
+    assert len(commands) == 2
+    assert "cd $PROJECT_ROOT && bash scripts/train/run_multinode_kd_sft.sh" in commands[0].command
+    assert "TEACHER_MODEL_PATH=/mnt/models/MinerU2.5-teacher" in commands[0].command
+    assert "NODE_RANK=1" in commands[1].command
+    assert "MASTER_ADDR=10.0.0.10" in commands[1].command
+    assert launch_metadata(context, project_root="/mnt/shared/ocr-vlm-training/current")["mode"] == "kd_sft"
+
+
+def test_kd_sft_run_context_requires_teacher_model_path(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_inventory(inventory)
+    _write_run(run, inventory, mode="kd_sft")
+
+    with pytest.raises(ValueError, match="TEACHER_MODEL_PATH"):
+        load_run_context(run, repo_root=tmp_path)
+
 def test_subset_sft_launch_uses_contiguous_derived_run_ranks(tmp_path: Path) -> None:
     inventory = tmp_path / "inventory.yaml"
     run = tmp_path / "run.yaml"
@@ -557,6 +587,40 @@ def test_background_launch_metadata_registers_training_log_paths(tmp_path: Path)
     launch = json.loads((state_root / "grpo-smoke" / "launch-metadata.json").read_text())
     assert launch["background_log_paths"] == ["/workspace/release/training-grpo.log"]
     assert "/workspace/release/training-grpo.log" in [str(path) for path in list_logs(state_root / "grpo-smoke")]
+
+
+def test_kd_sft_background_launch_metadata_registers_rank_logs(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    state_root = tmp_path / "state"
+    _write_inventory(inventory)
+    _write_run(run, inventory, mode="kd_sft")
+    payload = yaml.safe_load(run.read_text())
+    payload["run"]["paths"]["teacher_model_path"] = "/mnt/models/teacher"
+    run.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+    trainops_main(
+        [
+            "--run",
+            str(run),
+            "--repo-root",
+            str(tmp_path),
+            "--state-root",
+            str(state_root),
+            "--dry-run",
+            "launch",
+            "kd_sft",
+            "--background",
+            "--project-root",
+            "/workspace/release",
+        ]
+    )
+
+    launch = json.loads((state_root / "kd_sft-smoke" / "launch-metadata.json").read_text())
+    assert launch["background_log_paths"] == [
+        "/workspace/release/training-kd-sft-rank0.log",
+        "/workspace/release/training-kd-sft-rank1.log",
+    ]
 
 
 def test_cleanup_plan_preserves_current_release_by_default(tmp_path: Path) -> None:

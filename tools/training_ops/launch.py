@@ -12,6 +12,10 @@ def sft_background_log_path(project_root: str, rank: int) -> str:
     return f"{project_root.rstrip('/')}/training-sft-rank{rank}.log"
 
 
+def kd_sft_background_log_path(project_root: str, rank: int) -> str:
+    return f"{project_root.rstrip('/')}/training-kd-sft-rank{rank}.log"
+
+
 def build_grpo_launches(context: RunContext, *, project_root: str | None = None, background: bool = False) -> list[NodeCommand]:
     root = project_root or context.project_root()
     env = context.effective_env(project_root=root)
@@ -33,6 +37,18 @@ def build_sft_launches(context: RunContext, *, project_root: str | None = None, 
     return commands
 
 
+def build_kd_sft_launches(context: RunContext, *, project_root: str | None = None, background: bool = False) -> list[NodeCommand]:
+    root = project_root or context.project_root()
+    commands: list[NodeCommand] = []
+    for node in context.selected_nodes:
+        env = context.effective_env(node=node, project_root=root)
+        command = command_with_env(env, "cd $PROJECT_ROOT && bash scripts/train/run_multinode_kd_sft.sh", context.extra_args())
+        if background:
+            command = f"nohup {command} > {kd_sft_background_log_path(root, node.run_rank)} 2>&1 &"
+        commands.append(NodeCommand(node, "launch-kd-sft", command))
+    return commands
+
+
 def launch_metadata(
     context: RunContext,
     *,
@@ -42,14 +58,17 @@ def launch_metadata(
 ) -> dict:
     mode = mode or context.mode
     root = project_root or context.project_root()
-    commands = (
-        build_grpo_launches(context, project_root=root, background=background)
-        if mode == "grpo"
-        else build_sft_launches(context, project_root=root, background=background)
-    )
+    if mode == "grpo":
+        commands = build_grpo_launches(context, project_root=root, background=background)
+    elif mode == "kd_sft":
+        commands = build_kd_sft_launches(context, project_root=root, background=background)
+    else:
+        commands = build_sft_launches(context, project_root=root, background=background)
     background_log_paths: list[str] = []
     if background and mode == "grpo":
         background_log_paths = [grpo_background_log_path(root)]
+    elif background and mode == "kd_sft":
+        background_log_paths = [kd_sft_background_log_path(root, command.node.run_rank) for command in commands]
     elif background:
         background_log_paths = [sft_background_log_path(root, command.node.run_rank) for command in commands]
     return {

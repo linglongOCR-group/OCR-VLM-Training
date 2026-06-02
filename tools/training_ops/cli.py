@@ -10,7 +10,7 @@ from tools.training_ops.cleanup import execute_cleanup, plan_cleanup
 from tools.training_ops.config import load_run_context
 from tools.training_ops.deploy import deploy_shared, deploy_tmp
 from tools.training_ops.executor import Executor
-from tools.training_ops.launch import build_grpo_launches, build_sft_launches, launch_metadata
+from tools.training_ops.launch import build_grpo_launches, build_kd_sft_launches, build_sft_launches, launch_metadata
 from tools.training_ops.package import create_package
 from tools.training_ops.preflight import run_preflight
 from tools.training_ops.ray import build_ray_head_command, build_ray_status_commands, build_ray_stop_commands, build_ray_worker_commands
@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> None:
             "launch-metadata.json",
             launch_metadata(context, project_root=project_root, mode=args.launch_mode, background=args.background),
         )
-        commands = build_grpo_launches(context, project_root=project_root, background=args.background) if args.launch_mode == "grpo" else build_sft_launches(context, project_root=project_root, background=args.background)
+        commands = _launch_commands(context, mode=args.launch_mode, project_root=project_root, background=args.background)
         _run_node_commands(executor, commands)
     elif args.command == "status":
         state.write_json("status.json", collect_status(context, executor))
@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> None:
             if args.target == "run":
                 pattern = f"{marker}|EXPERIMENT_NAME={experiment}"
             else:
-                trainer = "verl.trainer.main_ppo" if args.target == "grpo" else "verl_plugins.trainers.sft_trainer"
+                trainer = _trainer_pattern(args.target)
                 pattern = f"({marker}|EXPERIMENT_NAME={experiment}).*{trainer}"
             stop_command = (
                 f"pattern={shlex.quote(pattern)}; "
@@ -117,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     ray_sub.add_parser("stop")
     launch = sub.add_parser("launch")
     launch_sub = launch.add_subparsers(dest="launch_mode", required=True)
-    for name in ("grpo", "sft"):
+    for name in ("grpo", "sft", "kd_sft"):
         child = launch_sub.add_parser(name)
         child.add_argument("--project-root")
         child.add_argument("--background", action="store_true")
@@ -126,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--node")
     logs.add_argument("--label")
     stop = sub.add_parser("stop")
-    stop.add_argument("--target", choices=["ray", "grpo", "sft", "run"], required=True)
+    stop.add_argument("--target", choices=["ray", "grpo", "sft", "kd_sft", "run"], required=True)
     cleanup = sub.add_parser("cleanup")
     cleanup.add_argument("--release-root", required=True)
     cleanup.add_argument("--current-link")
@@ -147,6 +147,22 @@ def _package(context, state):
         extra_excludes=context.deployment.get("extra_excludes") or (),
         extra_includes=context.deployment.get("extra_includes") or (),
     )
+
+
+def _launch_commands(context, *, mode: str, project_root: str, background: bool):
+    if mode == "grpo":
+        return build_grpo_launches(context, project_root=project_root, background=background)
+    if mode == "kd_sft":
+        return build_kd_sft_launches(context, project_root=project_root, background=background)
+    return build_sft_launches(context, project_root=project_root, background=background)
+
+
+def _trainer_pattern(target: str) -> str:
+    if target == "grpo":
+        return "verl.trainer.main_ppo"
+    if target == "kd_sft":
+        return "verl_plugins.trainers.kd_sft_trainer"
+    return "verl_plugins.trainers.sft_trainer"
 
 
 def _ray_commands(action: str, context):

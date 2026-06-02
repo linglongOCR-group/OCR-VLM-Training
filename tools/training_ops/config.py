@@ -92,15 +92,17 @@ class RunContext:
             else:
                 env.setdefault("USE_VALIDATION", "False")
             env.setdefault("RAY_ADDRESS", str(self.training.get("ray_address", "auto")))
-        elif self.mode == "sft":
+        elif self.mode in {"sft", "kd_sft"}:
             env["TRAIN_FILES"] = str(paths.get("train_files") or paths.get("train_file", ""))
+            if self.mode == "kd_sft":
+                env["TEACHER_MODEL_PATH"] = str(paths.get("teacher_model_path", ""))
             if paths.get("val_files") is not None:
                 env["VAL_FILES"] = str(paths.get("val_files"))
             elif paths.get("val_file") is not None:
                 env["VAL_FILES"] = str(paths.get("val_file"))
             env["MASTER_ADDR"] = str(self.training.get("master_addr", self.head_node.host_ip))
             env["MASTER_PORT"] = str(self.training.get("master_port", 29500))
-        if node is not None and self.mode == "sft":
+        if node is not None and self.mode in {"sft", "kd_sft"}:
             env["NODE_RANK"] = str(node.run_rank)
             env["TRAIN_IFACE"] = node.train_iface
         return env
@@ -131,8 +133,8 @@ def load_run_context(run_config_path: str | Path, *, repo_root: str | Path | Non
     if not run.get("id"):
         raise ConfigError("run.id is required")
     mode = str(run.get("mode", "")).lower()
-    if mode not in {"grpo", "sft"}:
-        raise ConfigError("run.mode must be grpo or sft")
+    if mode not in {"grpo", "sft", "kd_sft"}:
+        raise ConfigError("run.mode must be grpo, sft, or kd_sft")
     inventory_ref = run.get("inventory")
     if not inventory_ref:
         raise ConfigError("run.inventory is required")
@@ -213,6 +215,8 @@ def _validate_context(context: RunContext) -> None:
         missing.append("CKPTS_DIR")
     if context.mode == "grpo" and not paths.get("val_file") and str(context.training.get("use_validation", "True")) == "True":
         missing.append("VAL_FILE")
+    if context.mode == "kd_sft" and not paths.get("teacher_model_path"):
+        missing.append("TEACHER_MODEL_PATH")
     if missing:
         raise ConfigError("missing required fields for launch: " + ", ".join(missing))
 
