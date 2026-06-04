@@ -11,13 +11,13 @@ set -euo pipefail
 # Usage:
 #   node-0:
 #     MASTER_ADDR=10.10.10.10 NODE_RANK=0 TRAIN_IFACE=bond0 \
-#       MODEL_PATH=/path/to/model TRAIN_FILES='["/path/train/part-00000.parquet"]' \
-#       bash scripts/train/run_multinode_sft.sh
+#       MODEL_PATH=/path/to/model TEACHER_MODEL_PATH=/path/to/teacher TRAIN_FILES='["/path/train/part-00000.parquet"]' \
+#       bash scripts/train/run_multinode_kd_sft.sh
 #
 #   node-1:
 #     MASTER_ADDR=10.10.10.10 NODE_RANK=1 TRAIN_IFACE=bond0 \
-#       MODEL_PATH=/path/to/model TRAIN_FILES='["/path/train/part-00000.parquet"]' \
-#       bash scripts/train/run_multinode_sft.sh
+#       MODEL_PATH=/path/to/model TEACHER_MODEL_PATH=/path/to/teacher TRAIN_FILES='["/path/train/part-00000.parquet"]' \
+#       bash scripts/train/run_multinode_kd_sft.sh
 #
 # Notes:
 #   - MASTER_ADDR must be the host-plane IP of node-0, not an NPU RoCE IP.
