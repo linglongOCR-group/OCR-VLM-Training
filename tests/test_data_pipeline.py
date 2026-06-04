@@ -198,6 +198,66 @@ def _set_asset_dimensions(canonical_root: Path, asset_id: str, *, width: int, he
     assets.to_parquet(manifest_path, index=False)
 
 
+class _FailingOnBrokenTextSerializer:
+    name = "test_failing_text_v1"
+    version = "1.0.0"
+    task = "text"
+
+    def serialize(self, canonical_record: dict, context: dict) -> str:
+        del context
+        target = canonical_record.get("target") or {}
+        text = str(target.get("text", ""))
+        if text == "BROKEN_SERIALIZER_RECORD":
+            raise ValueError("test serializer rejected BROKEN_SERIALIZER_RECORD")
+        return text
+
+
+def _fake_view_config(canonical_root: Path, view_root: Path, *, include: list[dict], **overrides) -> dict:
+    config = {
+        "name": view_root.name,
+        "stage": "rlvr",
+        "model_family": "mineru2.5",
+        "paths": {"canonical_root": str(canonical_root), "view_root": str(view_root)},
+        "include": include,
+        "split_policy": {"level": "record", "train_ratio": 1.0, "val_ratio": 0.0, "test_ratio": 0.0, "seed": 7},
+        "reward_profile": {"default": "normalized_levenshtein_v1"},
+    }
+    config.update(overrides)
+    return config
+
+
+def _write_view_config(path: Path, config: dict) -> Path:
+    path.write_text(yaml.safe_dump(config))
+    return path
+
+
+def _append_text_record_with_missing_image(canonical_root: Path) -> str:
+    text_path = canonical_root / "records/text/source=FakeMinerU/part-00000.parquet"
+    texts = pd.read_parquet(text_path)
+    bad = texts.iloc[0].copy()
+    bad["record_id"] = "fake-text-missing-image"
+    bad["region_id"] = "fake-text-missing-image-region"
+    bad["image_asset_id"] = "missing-image-asset"
+    pd.concat([texts, pd.DataFrame([bad])], ignore_index=True).to_parquet(text_path, index=False)
+    return str(bad["record_id"])
+
+
+def _replace_text_record_image_asset(canonical_root: Path, image_asset_id: str) -> str:
+    text_path = canonical_root / "records/text/source=FakeMinerU/part-00000.parquet"
+    texts = pd.read_parquet(text_path)
+    texts.at[0, "image_asset_id"] = image_asset_id
+    texts.to_parquet(text_path, index=False)
+    return str(texts.iloc[0]["record_id"])
+
+
+def _replace_text_target(canonical_root: Path, target: dict) -> str:
+    text_path = canonical_root / "records/text/source=FakeMinerU/part-00000.parquet"
+    texts = pd.read_parquet(text_path)
+    texts.at[0, "target"] = target
+    texts.to_parquet(text_path, index=False)
+    return str(texts.iloc[0]["record_id"])
+
+
 def test_mineru_parallel_export_matches_serial_output(tmp_path):
     serial_dataset_root = tmp_path / "serial"
     serial_mineru_root = serial_dataset_root / "mineru"
@@ -1024,6 +1084,190 @@ def test_build_sft_view_embeds_images_and_messages(tmp_path):
     assert row["messages"][1]["content"] == row["label"]
 
 
+def test_cli_build_view_skip_failure_keeps_default_fail_fast_and_writes_successes(tmp_path, capsys):
+    canonical_root = _export_fake_canonical(tmp_path)
+    bad_record_id = _append_text_record_with_missing_image(canonical_root)
+    include = [{"task": "text", "sources": ["FakeMinerU"]}]
+
+    fail_root = tmp_path / "views" / "skip_failure_default_fails"
+    fail_config = _write_view_config(
+        tmp_path / "skip_failure_default_fails.yaml",
+        _fake_view_config(canonical_root, fail_root, include=include),
+    )
+    with pytest.raises(ValueError, match=f"embedded view cannot read image bytes for record {bad_record_id}"):
+        docds_main(["build-view", str(fail_config), "--schema-sample-size", "1"])
+
+    skip_root = tmp_path / "views" / "skip_failure_cli"
+    skip_config = _write_view_config(
+        tmp_path / "skip_failure_cli.yaml",
+        _fake_view_config(canonical_root, skip_root, include=include),
+    )
+
+    docds_main(["build-view", str(skip_config), "--skip-failure", "--schema-sample-size", "1"])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["total_records"] == 1
+    train = pd.read_parquet(skip_root / "train.parquet")
+    assert train["canonical_record_id"].tolist() != [bad_record_id]
+    assert train["task"].tolist() == ["text"]
+    validate_view(skip_root)
+
+
+def test_view_build_skip_failure_reports_final_materialization_diagnostics(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    bad_record_id = _append_text_record_with_missing_image(canonical_root)
+    view_root = tmp_path / "views" / "skip_failure_stats"
+
+    report = ViewBuilder(canonical_root, view_root).build(
+        _fake_view_config(
+            canonical_root,
+            view_root,
+            include=[{"task": "text", "sources": ["FakeMinerU"]}],
+        ),
+        skip_failure=True,
+        schema_sample_size=1,
+    )
+
+    assert report.total_records == 1
+    stats = json.loads((view_root / "stats.json").read_text())
+    skipped = stats["skipped_materialization_failures"]
+    assert skipped["total"] == 1
+    assert skipped["counts"]["by_phase"] == {"materialize": 1}
+    assert skipped["counts"]["by_task"] == {"text": 1}
+    assert skipped["counts"]["by_source"] == {"FakeMinerU": 1}
+    assert skipped["counts"]["by_exception_type"] == {"ValueError": 1}
+    assert len(skipped["examples"]) <= 10
+    example = skipped["examples"][0]
+    assert example["phase"] == "materialize"
+    assert example["record_id"] == bad_record_id
+    assert example["source_name"] == "FakeMinerU"
+    assert example["task"] == "text"
+    assert example["target_format"] == "plain_text_v1"
+    assert example["target_keys"] == ["text"]
+    assert example["exception_type"] == "ValueError"
+    assert "embedded view cannot read image bytes" in example["message"]
+    assert "A Title" in example["target_preview"]
+
+
+def test_view_build_skip_failure_fails_when_final_materialization_skips_every_record(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    _replace_text_record_image_asset(canonical_root, "missing-image-asset")
+    view_root = tmp_path / "views" / "skip_failure_no_rows"
+
+    with pytest.raises(ValueError, match="no records were materialized"):
+        ViewBuilder(canonical_root, view_root).build(
+            _fake_view_config(
+                canonical_root,
+                view_root,
+                include=[{"task": "text", "sources": ["FakeMinerU"]}],
+            ),
+            skip_failure=True,
+            schema_sample_size=1,
+        )
+
+    assert not (view_root / "train.parquet").exists()
+    assert not (view_root / "stats.json").exists()
+
+
+def test_view_build_skip_failure_schema_inference_skips_failed_samples_and_fails_when_all_fail(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    _replace_text_target(canonical_root, {"text": "BROKEN_SERIALIZER_RECORD"})
+    config = _fake_view_config(
+        canonical_root,
+        tmp_path / "views" / "schema_skip_has_good_sample",
+        include=[
+            {"task": "text", "sources": ["FakeMinerU"]},
+            {"task": "formula", "sources": ["FakeMinerU"]},
+        ],
+        target_serialization={"text": "test_failing_text_v1", "formula": "latex_plain_v1"},
+    )
+    builder = ViewBuilder(canonical_root, Path(config["paths"]["view_root"]))
+    builder.serializers.register("test_failing_text_v1", _FailingOnBrokenTextSerializer())
+
+    report = builder.build(config, skip_failure=True, schema_sample_size=1)
+
+    assert report.total_records == 1
+    train = pd.read_parquet(Path(config["paths"]["view_root"]) / "train.parquet")
+    assert train["task"].tolist() == ["formula"]
+    stats = json.loads((Path(config["paths"]["view_root"]) / "stats.json").read_text())
+    assert stats["skipped_materialization_failures"]["counts"]["by_phase"] == {
+        "infer-schema": 1,
+        "materialize": 1,
+    }
+
+    all_fail_root = tmp_path / "views" / "schema_skip_all_fail"
+    all_fail_config = _fake_view_config(
+        canonical_root,
+        all_fail_root,
+        include=[{"task": "text", "sources": ["FakeMinerU"]}],
+        target_serialization={"text": "test_failing_text_v1"},
+    )
+    all_fail_builder = ViewBuilder(canonical_root, all_fail_root)
+    all_fail_builder.serializers.register("test_failing_text_v1", _FailingOnBrokenTextSerializer())
+    with pytest.raises(ValueError, match="no valid records.*schema inference"):
+        all_fail_builder.build(all_fail_config, skip_failure=True, schema_sample_size=1)
+
+
+def test_enhanced_otsl_table_filter_drops_text_only_table_before_materialization(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    table_path = canonical_root / "records/table/source=FakeMinerU/part-00000.parquet"
+    tables = pd.read_parquet(table_path)
+    text_only_table_id = str(tables.iloc[0]["record_id"])
+    tables.at[0, "target"] = {"text": "plain table text is not enhanced OTSL input"}
+    tables.to_parquet(table_path, index=False)
+    view_root = tmp_path / "views" / "enhanced_otsl_filters_text_only"
+
+    report = ViewBuilder(canonical_root, view_root).build(
+        _fake_view_config(
+            canonical_root,
+            view_root,
+            include=[
+                {"task": "table", "sources": ["FakeMinerU"]},
+                {"task": "text", "sources": ["FakeMinerU"]},
+            ],
+            target_serialization={"table": "enhanced_otsl_v1", "text": "plain_text_v1"},
+        )
+    )
+
+    assert report.total_records == 1
+    train = pd.read_parquet(view_root / "train.parquet")
+    assert train["task"].tolist() == ["text"]
+    assert text_only_table_id not in set(train["canonical_record_id"])
+    stats = json.loads((view_root / "stats.json").read_text())
+    assert stats["filter_counts"]["empty_label"] == 1
+    assert "skipped_materialization_failures" not in stats
+
+
+def test_table_text_filter_drops_html_only_table_before_materialization(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    table_path = canonical_root / "records/table/source=FakeMinerU/part-00000.parquet"
+    tables = pd.read_parquet(table_path)
+    html_only_table_id = str(tables.iloc[0]["record_id"])
+    tables.at[0, "target"] = {"html": "<table><tr><td>A</td></tr></table>"}
+    tables.to_parquet(table_path, index=False)
+    view_root = tmp_path / "views" / "table_text_filters_html_only"
+
+    report = ViewBuilder(canonical_root, view_root).build(
+        _fake_view_config(
+            canonical_root,
+            view_root,
+            include=[
+                {"task": "table", "sources": ["FakeMinerU"]},
+                {"task": "text", "sources": ["FakeMinerU"]},
+            ],
+            target_serialization={"table": "table_text_v1", "text": "plain_text_v1"},
+        )
+    )
+
+    assert report.total_records == 1
+    train = pd.read_parquet(view_root / "train.parquet")
+    assert train["task"].tolist() == ["text"]
+    assert html_only_table_id not in set(train["canonical_record_id"])
+    stats = json.loads((view_root / "stats.json").read_text())
+    assert stats["filter_counts"]["empty_label"] == 1
+    assert "skipped_materialization_failures" not in stats
+
+
 def test_view_image_bytes_with_transform(tmp_path):
     canonical_root = _export_fake_canonical(tmp_path)
     view_root = tmp_path / "views" / "test_transform_view"
@@ -1423,6 +1667,35 @@ def test_parallel_source_reference_build_writes_reachable_assets(tmp_path):
     assert image_path.startswith("views/parallel_source_reference/assets/")
     assert (canonical_root.parent / image_path).is_file()
     validate_view(view_root, require_images=True)
+
+
+def test_parallel_build_skip_failure_reports_worker_failure_and_keeps_same_batch_success(tmp_path):
+    canonical_root = _export_fake_canonical(tmp_path)
+    bad_record_id = _append_text_record_with_missing_image(canonical_root)
+    view_root = tmp_path / "views" / "parallel_skip_failure"
+
+    report = ViewBuilder(canonical_root, view_root).build(
+        _fake_view_config(
+            canonical_root,
+            view_root,
+            include=[{"task": "text", "sources": ["FakeMinerU"]}],
+        ),
+        skip_failure=True,
+        schema_sample_size=1,
+        num_workers=2,
+        worker_batch_size=2,
+    )
+
+    assert report.total_records == 1
+    train = pd.read_parquet(view_root / "train.parquet")
+    assert train["canonical_record_id"].tolist() != [bad_record_id]
+    assert train["task"].tolist() == ["text"]
+    stats = json.loads((view_root / "stats.json").read_text())
+    skipped = stats["skipped_materialization_failures"]
+    assert skipped["total"] == 1
+    assert skipped["counts"]["by_phase"] == {"materialize": 1}
+    assert skipped["examples"][0]["record_id"] == bad_record_id
+    validate_view(view_root)
 
 
 def test_cli_build_view_accepts_worker_controls(tmp_path, capsys):

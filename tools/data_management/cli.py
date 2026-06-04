@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> None:
     build_view.add_argument("--num-workers", type=int)
     build_view.add_argument("--worker-batch-size", type=int)
     build_view.add_argument("--schema-sample-size", type=int)
+    build_view.add_argument("--skip-failure", action="store_true", default=False)
     _add_progress_args(build_view)
 
     validate_view_cmd = subparsers.add_parser("validate-view")
@@ -137,6 +138,7 @@ def main(argv: list[str] | None = None) -> None:
             num_workers=args.num_workers,
             worker_batch_size=args.worker_batch_size,
             schema_sample_size=args.schema_sample_size,
+            skip_failure=args.skip_failure,
         )
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         return

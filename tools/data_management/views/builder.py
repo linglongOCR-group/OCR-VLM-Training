@@ -41,6 +41,7 @@ class _WorkerState:
     context: dict[str, Any]
     view_name: str
     stage: str
+    skip_failure: bool
 
 _WORKER_STATE: _WorkerState | None = None
 
@@ -239,6 +240,7 @@ class ViewBuilder:
         num_workers: int | None = None,
         worker_batch_size: int | None = None,
         schema_sample_size: int | None = None,
+        skip_failure: bool = False,
     ) -> ViewBuildReport:
         if isinstance(view_config, str | Path):
             config = read_yaml(view_config)
@@ -263,6 +265,7 @@ class ViewBuilder:
         records, label_filter_counts = self._apply_label_filters(
             records,
             stage=stage,
+            target_serialization=config.get("target_serialization") or {},
             progress=progress,
             num_workers=execution["num_workers"],
             worker_batch_size=execution["worker_batch_size"],
@@ -284,6 +287,7 @@ class ViewBuilder:
                 num_workers=execution["num_workers"],
                 worker_batch_size=execution["worker_batch_size"],
                 schema_sample_size=execution["schema_sample_size"],
+                skip_failure=skip_failure,
             )
         view_assets_dir = self.view_root / "assets"
         if overwrite:
@@ -294,6 +298,7 @@ class ViewBuilder:
         materialize_ctx["view_assets_dir"] = view_assets_dir
         output_dir = self.view_root
         output_dir.mkdir(parents=True, exist_ok=True)
+        materialization_failures: list[dict[str, Any]] = []
         schema = self._infer_view_schema(
             records,
             config,
@@ -303,6 +308,8 @@ class ViewBuilder:
             split_map=split_map,
             progress=progress,
             schema_sample_size=execution["schema_sample_size"],
+            skip_failure=skip_failure,
+            materialization_failures=materialization_failures,
         )
         writer = _SplitParquetWriter(output_dir, schema, rows_per_shard=rows_per_shard)
         materialize_ctx["asset_dir_resolver"] = writer.asset_dirs
@@ -318,8 +325,12 @@ class ViewBuilder:
                 progress=progress,
                 num_workers=execution["num_workers"],
                 worker_batch_size=execution["worker_batch_size"],
+                skip_failure=skip_failure,
+                materialization_failures=materialization_failures,
             )
             split_counts = writer.finish()
+            if sum(split_counts.values()) == 0:
+                raise ValueError("no records were materialized after applying view materialization")
         except Exception:
             writer.abort()
             raise
@@ -330,6 +341,10 @@ class ViewBuilder:
             stats["filter_counts"] = filter_counts
         if writer.rows_per_shard:
             stats["shard_counts"] = writer.shard_counts
+        if materialization_failures:
+            stats["skipped_materialization_failures"] = _skipped_materialization_failure_stats(
+                materialization_failures
+            )
         write_json(output_dir / "stats.json", stats)
         if "_config_path" in config:
             target_config = output_dir / "view.yaml"
@@ -395,17 +410,34 @@ class ViewBuilder:
         progress: ProgressReporter | None,
         num_workers: int,
         worker_batch_size: int,
+        skip_failure: bool,
+        materialization_failures: list[dict[str, Any]],
     ) -> None:
         if num_workers == 1:
             for index, record in enumerate(records, start=1):
-                row = self._materialize(
-                    record,
-                    config,
-                    materialize_ctx,
-                    view_name=view_name,
-                    stage=stage,
-                    split=split_map[record["record_id"]],
-                )
+                try:
+                    row = self._materialize(
+                        record,
+                        config,
+                        materialize_ctx,
+                        view_name=view_name,
+                        stage=stage,
+                        split=split_map[record["record_id"]],
+                    )
+                except Exception as exc:
+                    if not skip_failure:
+                        raise
+                    failure = _materialization_failure_diagnostic(
+                        record,
+                        config,
+                        phase="materialize",
+                        exc=exc,
+                    )
+                    materialization_failures.append(failure)
+                    _log_skipped_materialization_failure(progress, failure)
+                    if progress:
+                        progress.update("build-view", index, total=len(records), phase="materialize")
+                    continue
                 writer.write(row)
                 if progress:
                     progress.update("build-view", index, total=len(records), phase="materialize")
@@ -417,13 +449,17 @@ class ViewBuilder:
         with ProcessPoolExecutor(
             max_workers=num_workers,
             initializer=_init_view_worker,
-            initargs=(self.processing_config, config, worker_ctx, view_name, stage),
+            initargs=(self.processing_config, config, worker_ctx, view_name, stage, skip_failure),
         ) as executor:
             batches = _iter_materialize_batches(records, split_map, worker_batch_size)
-            for rows in executor.map(_materialize_record_batch, batches):
+            for result in executor.map(_materialize_record_batch, batches):
+                rows = result["rows"]
                 for row in rows:
                     writer.write(row)
-                processed += len(rows)
+                for failure in result["failures"]:
+                    materialization_failures.append(failure)
+                    _log_skipped_materialization_failure(progress, failure)
+                processed += result["processed"]
                 if progress:
                     progress.update("build-view", processed, total=len(records), phase="materialize")
 
@@ -438,6 +474,8 @@ class ViewBuilder:
         split_map: dict[str, str],
         progress: ProgressReporter | None = None,
         schema_sample_size: int = 4096,
+        skip_failure: bool = False,
+        materialization_failures: list[dict[str, Any]] | None = None,
     ) -> pa.Schema:
         """Infer a stable parquet schema without loading image bytes."""
         schema_ctx = {**materialize_ctx, "schema_inference": True}
@@ -445,14 +483,30 @@ class ViewBuilder:
         batch: list[dict[str, Any]] = []
         sample_records = _schema_sample_records(records, schema_sample_size)
         for index, record in enumerate(sample_records, start=1):
-            row = self._materialize(
-                record,
-                config,
-                schema_ctx,
-                view_name=view_name,
-                stage=stage,
-                split=split_map[record["record_id"]],
-            )
+            try:
+                row = self._materialize(
+                    record,
+                    config,
+                    schema_ctx,
+                    view_name=view_name,
+                    stage=stage,
+                    split=split_map[record["record_id"]],
+                )
+            except Exception as exc:
+                if not skip_failure:
+                    raise
+                failure = _materialization_failure_diagnostic(
+                    record,
+                    config,
+                    phase="infer-schema",
+                    exc=exc,
+                )
+                if materialization_failures is not None:
+                    materialization_failures.append(failure)
+                _log_skipped_materialization_failure(progress, failure)
+                if progress:
+                    progress.update("build-view", index, total=len(sample_records), phase="infer-schema")
+                continue
             batch.append(row)
             if len(batch) >= 4096:
                 schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
@@ -462,6 +516,10 @@ class ViewBuilder:
         if batch:
             schemas.append(pa.Table.from_pylist(batch).schema.remove_metadata())
         if not schemas:
+            if skip_failure:
+                raise ValueError(
+                    "no valid records available for schema inference after skipping materialization failures"
+                )
             raise ValueError("view selection produced no records")
         return _ensure_view_schema_columns(pa.unify_schemas(schemas))
 
@@ -482,6 +540,7 @@ class ViewBuilder:
         records: list[dict[str, Any]],
         *,
         stage: str,
+        target_serialization: dict[str, str],
         progress: ProgressReporter | None = None,
         num_workers: int = 1,
         worker_batch_size: int = 256,
@@ -498,13 +557,14 @@ class ViewBuilder:
             if (
                 record.get("task") == "table"
                 and isinstance(target, dict)
+                and (target_serialization.get("table") or _default_serializer_for_task("table")) == "enhanced_otsl_v1"
                 and not target.get("enhanced_otsl")
                 and not target.get("otsl")
                 and target.get("html")
             ):
                 html_checks.append((index, str(target["html"])))
             else:
-                keep_flags[index] = _record_has_serializable_label(record)
+                keep_flags[index] = _record_has_serializable_label(record, target_serialization)
 
         if html_checks:
             processed = 0
@@ -969,7 +1029,7 @@ def _default_serializer_for_task(task: str) -> str:
         raise KeyError(f"no default serializer for task {task}") from exc
 
 
-def _record_has_serializable_label(record: dict[str, Any]) -> bool:
+def _record_has_serializable_label(record: dict[str, Any], target_serialization: dict[str, str]) -> bool:
     target = record.get("target") or {}
     if not isinstance(target, dict):
         return False
@@ -979,6 +1039,17 @@ def _record_has_serializable_label(record: dict[str, Any]) -> bool:
     if task == "formula":
         return bool(str(target.get("latex", "")))
     if task == "table":
+        target_format = target_serialization.get("table") or _default_serializer_for_task("table")
+        if target_format == "enhanced_otsl_v1":
+            if target.get("enhanced_otsl"):
+                return bool(str(target["enhanced_otsl"]))
+            if target.get("otsl"):
+                return bool(str(target["otsl"]))
+            if target.get("html"):
+                return bool(html_to_otsl(str(target["html"])))
+            return False
+        if target_format == "table_text_v1":
+            return bool(str(target.get("text", "")))
         if target.get("enhanced_otsl"):
             return bool(str(target["enhanced_otsl"]))
         if target.get("otsl"):
@@ -989,6 +1060,95 @@ def _record_has_serializable_label(record: dict[str, Any]) -> bool:
             return bool(str(target["text"]))
         return False
     return True
+
+
+def _materialization_failure_diagnostic(
+    record: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    phase: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    task = str(record.get("task") or "")
+    target_format = (config.get("target_serialization") or {}).get(task) or _default_serializer_for_task(task)
+    target = record.get("target") or {}
+    if isinstance(target, dict):
+        target_keys = sorted(str(key) for key in target.keys())
+    else:
+        target_keys = []
+    return {
+        "phase": phase,
+        "record_id": record.get("record_id"),
+        "source_name": record.get("source_name"),
+        "task": task,
+        "document_id": record.get("document_id"),
+        "page_id": record.get("page_id"),
+        "region_id": record.get("region_id"),
+        "target_format": target_format,
+        "target_keys": target_keys,
+        "target_preview": _target_preview(target),
+        "exception_type": type(exc).__name__,
+        "message": _truncate_text(str(exc), 512),
+    }
+
+
+def _target_preview(target: Any) -> str:
+    if isinstance(target, dict):
+        parts = []
+        for key in sorted(target.keys(), key=str):
+            value = target[key]
+            if value in (None, ""):
+                continue
+            parts.append(f"{key}={_truncate_text(str(value), 160)}")
+        return _truncate_text("; ".join(parts), 512)
+    return _truncate_text(str(target), 512)
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)] + "..."
+
+
+def _log_skipped_materialization_failure(
+    progress: ProgressReporter | None,
+    failure: dict[str, Any],
+) -> None:
+    if not progress:
+        return
+    progress.log(
+        "build-view",
+        phase="skip-materialization-failure",
+        materialization_phase=failure.get("phase"),
+        record_id=failure.get("record_id"),
+        source_name=failure.get("source_name"),
+        task=failure.get("task"),
+        target_format=failure.get("target_format"),
+        exception_type=failure.get("exception_type"),
+        message=_truncate_text(str(failure.get("message") or ""), 160),
+    )
+
+
+def _skipped_materialization_failure_stats(failures: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "total": len(failures),
+        "counts": {
+            "by_phase": _count_failures_by(failures, "phase"),
+            "by_task": _count_failures_by(failures, "task"),
+            "by_source": _count_failures_by(failures, "source_name"),
+            "by_exception_type": _count_failures_by(failures, "exception_type"),
+        },
+        "examples": failures[:10],
+    }
+
+
+def _count_failures_by(failures: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for failure in failures:
+        value = failure.get(key)
+        label = str(value) if value not in (None, "") else "unknown"
+        counts[label] = counts.get(label, 0) + 1
+    return counts
 
 
 def _record_has_reserved_media_token_label(record: dict[str, Any]) -> bool:
@@ -1114,6 +1274,7 @@ def _init_view_worker(
     materialize_ctx: dict[str, Any],
     view_name: str,
     stage: str,
+    skip_failure: bool,
 ) -> None:
     global _WORKER_STATE
     _WORKER_STATE = _WorkerState(
@@ -1122,23 +1283,39 @@ def _init_view_worker(
         context=materialize_ctx,
         view_name=view_name,
         stage=stage,
+        skip_failure=skip_failure,
     )
 
 
-def _materialize_record_batch(batch: list[tuple[dict[str, Any], str]]) -> list[dict[str, Any]]:
+def _materialize_record_batch(batch: list[tuple[dict[str, Any], str]]) -> dict[str, Any]:
     if _WORKER_STATE is None:
         raise RuntimeError("view materialization worker is not initialized")
-    return [
-        _WORKER_STATE.builder._materialize(
-            record,
-            _WORKER_STATE.config,
-            _WORKER_STATE.context,
-            view_name=_WORKER_STATE.view_name,
-            stage=_WORKER_STATE.stage,
-            split=split,
-        )
-        for record, split in batch
-    ]
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for record, split in batch:
+        try:
+            rows.append(
+                _WORKER_STATE.builder._materialize(
+                    record,
+                    _WORKER_STATE.config,
+                    _WORKER_STATE.context,
+                    view_name=_WORKER_STATE.view_name,
+                    stage=_WORKER_STATE.stage,
+                    split=split,
+                )
+            )
+        except Exception as exc:
+            if not _WORKER_STATE.skip_failure:
+                raise
+            failures.append(
+                _materialization_failure_diagnostic(
+                    record,
+                    _WORKER_STATE.config,
+                    phase="materialize",
+                    exc=exc,
+                )
+            )
+    return {"rows": rows, "failures": failures, "processed": len(batch)}
 
 
 def _filter_rows(rows: list[dict[str, Any]], where: dict[str, Any]) -> list[dict[str, Any]]:
