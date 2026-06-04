@@ -40,6 +40,16 @@ def test_extract_response_mask_preserves_shifted_loss_mask_semantics():
     assert torch.equal(mask, torch.tensor([[True, True, False]]))
 
 
+def test_extract_response_mask_shifts_nested_loss_mask_within_each_sequence():
+    values = torch.tensor([False, False, False, True, False, False])
+    offsets = torch.tensor([0, 3, 6])
+    loss_mask = torch.nested.nested_tensor_from_jagged(values, offsets=offsets)
+
+    mask = extract_response_mask({"loss_mask": loss_mask}, target_seq_len=6)
+
+    assert torch.equal(mask, torch.tensor([False, False, False, False, False, True]))
+
+
 def test_compose_kd_sft_loss_logs_raw_weighted_losses_lambdas_and_temperature():
     student_logits = torch.tensor([[[2.0, 1.0, 0.0], [0.0, 3.0, 1.0]]], requires_grad=True)
     teacher_logits = torch.tensor([[[3.0, 1.0, 0.0], [0.0, 4.0, 2.0]]], requires_grad=True)

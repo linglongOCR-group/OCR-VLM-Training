@@ -63,7 +63,7 @@ def extract_response_mask(data: Mapping[str, Any], *, target_seq_len: int) -> to
     if "loss_mask" in data:
         loss_mask = data["loss_mask"]
         if getattr(loss_mask, "is_nested", False):
-            return torch.roll(loss_mask.values(), shifts=-1, dims=0).bool()
+            return _shift_nested_loss_mask_values(loss_mask, target_seq_len=target_seq_len)
         return align_response_mask_for_shifted_logits(loss_mask, target_seq_len=target_seq_len)
     if "response_mask" in data:
         return data["response_mask"].bool()
@@ -423,6 +423,33 @@ def _masked_negative_log_prob(log_probs: torch.Tensor, mask: torch.Tensor) -> to
         mask = align_response_mask_for_shifted_logits(mask, target_seq_len=log_probs.shape[-1])
     mask = mask.to(log_probs.device, dtype=log_probs.dtype)
     return -(log_probs * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def _shift_nested_loss_mask_values(loss_mask: torch.Tensor, *, target_seq_len: int) -> torch.Tensor:
+    values = loss_mask.values()
+    offsets = loss_mask.offsets()
+    if values.ndim != 1:
+        raise ValueError(f"nested loss_mask values must be 1-D, got shape {tuple(values.shape)}")
+    if values.numel() != target_seq_len:
+        raise ValueError(
+            "nested loss_mask value count must equal target_seq_len "
+            f"(got {values.numel()} for target_seq_len={target_seq_len})"
+        )
+    if offsets.ndim != 1 or offsets.numel() < 2:
+        raise ValueError("nested loss_mask offsets must be a 1-D tensor with at least two entries")
+    if int(offsets[0].item()) != 0 or int(offsets[-1].item()) != values.numel():
+        raise ValueError("nested loss_mask offsets must span all loss_mask values")
+
+    shifted = torch.empty_like(values, dtype=torch.bool)
+    for start_tensor, end_tensor in zip(offsets[:-1], offsets[1:]):
+        start = int(start_tensor.item())
+        end = int(end_tensor.item())
+        if end < start:
+            raise ValueError("nested loss_mask offsets must be non-decreasing")
+        if end == start:
+            continue
+        shifted[start:end] = torch.roll(values[start:end], shifts=-1, dims=0).bool()
+    return shifted
 
 
 def _as_dense_or_flat(tensor: torch.Tensor) -> torch.Tensor:
