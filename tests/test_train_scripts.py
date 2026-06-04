@@ -88,6 +88,8 @@ def test_multinode_kd_sft_script_uses_repo_local_kd_entrypoint():
 
     for snippet in required_snippets:
         assert snippet in script
+    assert 'KD_HIDDEN_LAYER_MAP="${KD_HIDDEN_LAYER_MAP:-' not in script
+    assert "KD_HIDDEN_LAYER_MAP='[{student_hidden_index:1,teacher_hidden_index:1}]'" in script
 
 
 def test_kd_sft_config_uses_repo_local_kd_entrypoint_and_default_layer_map():

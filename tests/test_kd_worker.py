@@ -1,10 +1,12 @@
 from types import SimpleNamespace
+from dataclasses import dataclass
 
 import pytest
 import torch
 
 from verl_plugins.trainers.kd_worker import (
     KDStepConfig,
+    clone_teacher_engine_config,
     compose_kd_sft_loss,
     extract_response_mask,
 )
@@ -78,6 +80,30 @@ def test_compose_kd_sft_loss_logs_raw_weighted_losses_lambdas_and_temperature():
     assert teacher_hidden[1].grad is None
 
 
+def test_compose_kd_sft_loss_flattens_single_batch_hidden_captures_for_flat_response_mask():
+    student_output = {
+        "logits": torch.zeros(2, 3, requires_grad=True),
+        "log_probs": torch.tensor([-0.5, -0.25], requires_grad=True),
+    }
+    teacher_output = {"logits": torch.zeros(2, 3)}
+    student_hidden = {1: torch.tensor([[[1.0, 0.0], [0.0, 1.0]]], requires_grad=True)}
+    teacher_hidden = {1: torch.tensor([[[1.0, 0.0], [1.0, 0.0]]])}
+    data = {"response_mask": torch.tensor([True, True])}
+
+    result = compose_kd_sft_loss(
+        student_output=student_output,
+        teacher_output=teacher_output,
+        student_hidden_captures=student_hidden,
+        teacher_hidden_captures=teacher_hidden,
+        data=data,
+        config=_step_config(logits_enabled=False),
+    )
+    result.loss.backward()
+
+    assert result.metrics["train/loss_hidden_raw"] > 0.0
+    assert student_hidden[1].grad is not None
+
+
 def test_compose_kd_sft_loss_reports_empty_response_tokens_with_context():
     data = {"loss_mask": torch.tensor([[False, False, False]])}
     output = {
@@ -95,3 +121,16 @@ def test_compose_kd_sft_loss_reports_empty_response_tokens_with_context():
             config=_step_config(global_step=9, hidden_enabled=False),
             context=SimpleNamespace(rank=3),
         )
+
+
+@dataclass(frozen=True)
+class _FrozenEngineConfig:
+    forward_only: bool = False
+    optimizer_offload: bool = True
+
+
+def test_clone_teacher_engine_config_handles_frozen_verl_configs():
+    cloned = clone_teacher_engine_config(_FrozenEngineConfig())
+
+    assert cloned.forward_only is True
+    assert cloned.optimizer_offload is False

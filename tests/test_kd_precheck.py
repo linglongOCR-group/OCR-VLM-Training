@@ -166,6 +166,36 @@ def test_tokenizer_identity_allows_same_path_from_tokenizer_object_or_contract()
     )
 
 
+class _FakeTokenizer:
+    def __init__(self, name_or_path, vocab):
+        self.name_or_path = name_or_path
+        self._vocab = vocab
+
+    def get_vocab(self):
+        return dict(self._vocab)
+
+
+def test_tokenizer_contract_allows_different_paths_when_tokenizer_vocab_matches():
+    validate_kd_config(
+        _valid_config(),
+        student=_contract(tokenizer_path="/models/student-trim", tokenizer_name="/models/student-trim"),
+        teacher=_contract(tokenizer_path="/models/origin", tokenizer_name="/models/origin"),
+        student_tokenizer=_FakeTokenizer("/models/student-trim", {"a": 1, "b": 2}),
+        teacher_tokenizer=_FakeTokenizer("/models/origin", {"a": 1, "b": 2}),
+        teacher_model=_frozen_teacher(),
+    )
+
+    with pytest.raises(ValueError, match="tokenizers must match"):
+        validate_kd_config(
+            _valid_config(),
+            student=_contract(tokenizer_path="/models/student-trim", tokenizer_name="/models/student-trim"),
+            teacher=_contract(tokenizer_path="/models/origin", tokenizer_name="/models/origin"),
+            student_tokenizer=_FakeTokenizer("/models/student-trim", {"a": 1, "b": 2}),
+            teacher_tokenizer=_FakeTokenizer("/models/origin", {"a": 1, "c": 2}),
+            teacher_model=_frozen_teacher(),
+        )
+
+
 def test_hidden_size_is_required_to_match_only_when_hidden_kd_enabled():
     validate_kd_config(
         _valid_config(hidden={"enabled": False}),

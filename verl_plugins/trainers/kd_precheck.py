@@ -297,6 +297,13 @@ def _validate_tokenizer_contract(
     student_tokenizer: Any | None,
     teacher_tokenizer: Any | None,
 ) -> None:
+    student_vocab = _tokenizer_vocab(student_tokenizer)
+    teacher_vocab = _tokenizer_vocab(teacher_tokenizer)
+    if student_vocab is not None and teacher_vocab is not None:
+        if student_vocab != teacher_vocab:
+            raise ValueError("Teacher and student tokenizers must match")
+        return
+
     student_identity = _tokenizer_identity(student_tokenizer, fallback=student)
     teacher_identity = _tokenizer_identity(teacher_tokenizer, fallback=teacher)
     if student_identity and teacher_identity and student_identity != teacher_identity:
@@ -332,6 +339,15 @@ def _tokenizer_identity(tokenizer: Any | None, *, fallback: ModelContract) -> st
     if fallback.tokenizer_name:
         return fallback.tokenizer_name
     return None
+
+
+def _tokenizer_vocab(tokenizer: Any | None) -> dict[str, int] | None:
+    if tokenizer is None or not hasattr(tokenizer, "get_vocab"):
+        return None
+    vocab = tokenizer.get_vocab()
+    if not isinstance(vocab, Mapping):
+        return None
+    return {str(token): int(index) for token, index in vocab.items()}
 
 
 def _processor_contract(processor: Any | None, *, fallback: ModelContract) -> tuple[str | None, tuple[str, ...]]:

@@ -5,7 +5,9 @@ from pathlib import Path
 
 import hydra
 from omegaconf import OmegaConf
+from tensordict.tensorclass import NonTensorData
 
+from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import auto_set_device
 from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
@@ -78,8 +80,36 @@ class OcrKDSFTTrainer(OcrSFTTrainer):
 
         self.training_client.reset()
         validate_teacher_frozen(self.training_client.teacher_engine.module)
+        if str(self.kd_config.precheck.get("mode", "config")) == "dry_run_batch":
+            if not hasattr(self, "device_name"):
+                self.device_name = str(self.config.trainer.get("device", "cpu"))
+            self._run_dry_run_batch_precheck()
         log_with_rank(
             "KD-SFT config precheck passed and teacher is frozen.",
+            logger=logger,
+            rank=0,
+            log_only_rank_0=True,
+        )
+
+    def _run_dry_run_batch_precheck(self) -> None:
+        try:
+            first_batch = next(iter(self.train_dataloader))
+        except StopIteration as exc:
+            raise ValueError("KD-SFT dry-run batch precheck requires at least one training batch") from exc
+
+        data = tu.get_tensordict(
+            tensor_dict=first_batch,
+            non_tensor_dict=self._build_validation_meta_info(),
+        )
+        batch_seqlens = self._get_batch_seqlens(data=data)
+        tu.assign_non_tensor(
+            data,
+            global_step=0,
+            global_token_num=NonTensorData(batch_seqlens),
+        )
+        self.training_client.dry_run_batch(data=data)
+        log_with_rank(
+            "KD-SFT dry-run batch precheck passed.",
             logger=logger,
             rank=0,
             log_only_rank_0=True,

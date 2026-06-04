@@ -623,6 +623,25 @@ def test_kd_sft_background_launch_metadata_registers_rank_logs(tmp_path: Path) -
     ]
 
 
+def test_kd_sft_background_launch_wraps_env_prefixed_command_in_shell(tmp_path: Path) -> None:
+    inventory = tmp_path / "inventory.yaml"
+    run = tmp_path / "run.yaml"
+    _write_inventory(inventory)
+    _write_run(run, inventory, mode="kd_sft")
+    payload = yaml.safe_load(run.read_text())
+    payload["run"]["paths"]["teacher_model_path"] = "/mnt/models/teacher"
+    run.write_text(yaml.safe_dump(payload, sort_keys=False))
+    context = load_run_context(run, repo_root=tmp_path)
+
+    commands = build_kd_sft_launches(context, project_root="/workspace/release", background=True)
+
+    assert commands[0].command.startswith("nohup bash -lc ")
+    assert "nohup PROJECT_ROOT=" not in commands[0].command
+    assert "PROJECT_ROOT=/workspace/release" in commands[0].command
+    assert "bash scripts/train/run_multinode_kd_sft.sh" in commands[0].command
+    assert commands[0].command.endswith(" > /workspace/release/training-kd-sft-rank0.log 2>&1 &")
+
+
 def test_cleanup_plan_preserves_current_release_by_default(tmp_path: Path) -> None:
     release_root = tmp_path / "releases"
     old_release = release_root / "old"

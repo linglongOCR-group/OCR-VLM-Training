@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 from typing import Any
 
 import torch
@@ -130,8 +130,14 @@ def compose_kd_sft_loss(
 
     loss_hidden_raw = zero
     if config.hidden_enabled and lambda_hidden != 0.0:
-        student_hidden = {key: _as_dense_or_flat(value) for key, value in student_hidden_captures.items()}
-        teacher_hidden = {key: _as_dense_or_flat(value).detach() for key, value in teacher_hidden_captures.items()}
+        student_hidden = {
+            key: _hidden_for_response_mask(value, response_mask)
+            for key, value in student_hidden_captures.items()
+        }
+        teacher_hidden = {
+            key: _hidden_for_response_mask(value, response_mask).detach()
+            for key, value in teacher_hidden_captures.items()
+        }
         loss_hidden_raw = hidden_kd_loss(
             student_hidden,
             teacher_hidden,
@@ -171,10 +177,10 @@ class KDTrainingWorker(TrainingWorker):
         self.kd_config = kd_config
         self.teacher_model_config = teacher_model_config
         self.teacher_engine_config = teacher_engine_config
-        self.teacher_engine_config.forward_only = True
-        self.teacher_engine_config.optimizer_offload = False
-        self.teacher_engine_config.use_remove_padding = self.teacher_model_config.use_remove_padding
-        self.teacher_engine_config.use_fused_kernels = self.teacher_model_config.use_fused_kernels
+        _set_config_field(self.teacher_engine_config, "forward_only", True)
+        _set_config_field(self.teacher_engine_config, "optimizer_offload", False)
+        _set_config_field(self.teacher_engine_config, "use_remove_padding", self.teacher_model_config.use_remove_padding)
+        _set_config_field(self.teacher_engine_config, "use_fused_kernels", self.teacher_model_config.use_fused_kernels)
         self.teacher_engine = EngineRegistry.new(
             model_type="kd_language_model",
             backend=self.teacher_engine_config.strategy,
@@ -223,6 +229,17 @@ class KDTrainingWorker(TrainingWorker):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
         return super().infer_batch(data)
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    def dry_run_batch(self, data: TensorDict) -> TensorDict:
+        self._assign_default_batch_meta(data)
+        disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
+        with (
+            self.engine.eval_mode(disable_auto_offload=disable_auto_offload),
+            self.teacher_engine.eval_mode(disable_auto_offload=True),
+        ):
+            output = self._kd_dry_run_batch(data)
+        return output.cpu() if hasattr(output, "cpu") else output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def reset(self):
@@ -282,6 +299,47 @@ class KDTrainingWorker(TrainingWorker):
         if self.engine.is_mp_src_rank_with_outputs():
             outputs["metrics"]["grad_norm"] = grad_norm
         return outputs
+
+    def _kd_dry_run_batch(self, data: TensorDict) -> TensorDict:
+        from verl.workers.engine.base import maybe_fix_3d_position_ids
+        from verl.workers.engine.utils import prepare_micro_batches
+
+        maybe_fix_3d_position_ids(data)
+        tu.assign_non_tensor(data, sp_size=self.engine.ulysses_sequence_parallel_size)
+        micro_batches, _indices = prepare_micro_batches(
+            data=data,
+            dp_group=self.engine.get_data_parallel_group(),
+            same_micro_num_in_dp=True,
+        )
+        if not micro_batches:
+            raise ValueError("KD-SFT dry-run batch precheck requires at least one prepared microbatch")
+
+        micro_batch = micro_batches[0]
+        self.student_hidden_store.clear()
+        self.teacher_hidden_store.clear()
+        with torch.no_grad():
+            _, teacher_meta = self.teacher_engine.forward_step(
+                micro_batch,
+                loss_function=None,
+                forward_only=True,
+            )
+        teacher_output = teacher_meta["model_output"]
+
+        def kd_loss(model_output, data, dp_group=None):
+            result = compose_kd_sft_loss(
+                student_output=model_output,
+                teacher_output=teacher_output,
+                student_hidden_captures=self.student_hidden_store.captures,
+                teacher_hidden_captures=self.teacher_hidden_store.captures,
+                data=data,
+                config=self._step_config(data),
+                context=KDStepContext(rank=self.rank),
+            )
+            return result.loss, result.metrics
+
+        with torch.no_grad():
+            _loss, student_meta = self.engine.forward_step(micro_batch, loss_function=kd_loss, forward_only=False)
+        return student_meta
 
     def _step_config(self, data: TensorDict) -> KDStepConfig:
         global_step = int(tu.get_non_tensor_data(data=data, key="global_step", default=0))
@@ -348,9 +406,16 @@ def clone_teacher_model_config(student_model_config, teacher_path: str):
 
 def clone_teacher_engine_config(student_engine_config):
     teacher_engine_config = copy.deepcopy(student_engine_config)
-    teacher_engine_config.forward_only = True
-    teacher_engine_config.optimizer_offload = False
+    _set_config_field(teacher_engine_config, "forward_only", True)
+    _set_config_field(teacher_engine_config, "optimizer_offload", False)
     return teacher_engine_config
+
+
+def _set_config_field(config, name: str, value: Any) -> None:
+    try:
+        setattr(config, name, value)
+    except FrozenInstanceError:
+        object.__setattr__(config, name, value)
 
 
 def _masked_negative_log_prob(log_probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -364,6 +429,18 @@ def _as_dense_or_flat(tensor: torch.Tensor) -> torch.Tensor:
     if getattr(tensor, "is_nested", False):
         return tensor.values()
     return tensor
+
+
+def _hidden_for_response_mask(tensor: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    hidden = _as_dense_or_flat(tensor)
+    if (
+        response_mask.ndim == 1
+        and hidden.ndim == 3
+        and hidden.shape[0] == 1
+        and hidden.shape[1] == response_mask.shape[0]
+    ):
+        return hidden.squeeze(0)
+    return hidden
 
 
 def _metric(value: torch.Tensor) -> float:

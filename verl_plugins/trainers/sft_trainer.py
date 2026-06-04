@@ -121,7 +121,7 @@ class OcrSFTTrainer(SFTTrainer):
                     self.training_client.stop_profile()
 
                 if self.engine.is_mp_src_rank_with_outputs():
-                    metrics = tu.get(output, "metrics")
+                    metrics = _normalize_training_metrics(tu.get(output, "metrics"))
 
                     for key in ["loss", "grad_norm", "lr", "mfu"]:
                         if key in metrics.keys():
@@ -222,6 +222,84 @@ def _metrics_from_output(output) -> dict:
     if isinstance(output, dict):
         return output["metrics"]
     return tu.get(output, "metrics")
+
+
+_KD_LOSS_METRIC_KEYS = {
+    "train/loss_sft_raw",
+    "train/loss_logit_raw",
+    "train/loss_hidden_raw",
+    "train/loss_sft_weighted",
+    "train/loss_logit_weighted",
+    "train/loss_hidden_weighted",
+}
+
+_KD_CONSTANT_METRIC_KEYS = {
+    "train/lambda_sft",
+    "train/lambda_logit",
+    "train/lambda_hidden",
+    "train/kd_temperature",
+    "train/kd_logits_top_k",
+    "train/kd_logits_loss_type",
+    "train/kd_hidden_layers",
+}
+
+
+def _normalize_training_metrics(metrics: dict) -> dict:
+    return {key: _normalize_training_metric_value(key, value) for key, value in metrics.items()}
+
+
+def _normalize_training_metric_value(key: str, value):
+    if not isinstance(value, (list, tuple)):
+        return _scalar_metric_value(value)
+
+    if key in _KD_CONSTANT_METRIC_KEYS:
+        flattened = _flatten_metric_values(value)
+        return _scalar_metric_value(flattened[0]) if flattened else None
+
+    if key in _KD_LOSS_METRIC_KEYS:
+        return _reduce_microbatch_loss_metric(value)
+
+    flattened = [_scalar_metric_value(item) for item in _flatten_metric_values(value)]
+    numeric_values = [item for item in flattened if _is_numeric_metric_value(item)]
+    if len(numeric_values) == len(flattened) and numeric_values:
+        return sum(float(item) for item in numeric_values) / len(numeric_values)
+    if flattened and all(item == flattened[0] for item in flattened):
+        return flattened[0]
+    return value
+
+
+def _reduce_microbatch_loss_metric(value) -> float:
+    if isinstance(value, (list, tuple)) and value and all(isinstance(item, (list, tuple)) for item in value):
+        rank_sums = [_sum_numeric_metric_values(rank_values) for rank_values in value]
+        return sum(rank_sums) / len(rank_sums)
+    return _sum_numeric_metric_values(value)
+
+
+def _sum_numeric_metric_values(value) -> float:
+    flattened = [_scalar_metric_value(item) for item in _flatten_metric_values(value)]
+    return sum(float(item) for item in flattened if _is_numeric_metric_value(item))
+
+
+def _flatten_metric_values(value) -> list:
+    if isinstance(value, (list, tuple)):
+        flattened = []
+        for item in value:
+            flattened.extend(_flatten_metric_values(item))
+        return flattened
+    return [value]
+
+
+def _scalar_metric_value(value):
+    if isinstance(value, torch.Tensor):
+        detached = value.detach()
+        if detached.numel() == 1:
+            return detached.item()
+        return detached.float().mean().item()
+    return value
+
+
+def _is_numeric_metric_value(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _distributed_barrier_if_initialized() -> None:
