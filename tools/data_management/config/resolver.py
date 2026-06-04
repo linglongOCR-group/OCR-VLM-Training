@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.data_management.utils.io import read_yaml
+from tools.data_management.paths import DATA_ROOT_ENV
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -76,11 +77,11 @@ def _resolve_optional_config(path: str | Path | None) -> Path | None:
 
 
 def _resolve_dataset_root(value: Any, *, required: bool) -> Path:
-    candidate = _expand_env(str(value)) if value else os.environ.get("OCR_DATASET_ROOT")
+    candidate = _expand_env(str(value)) if value else os.environ.get(DATA_ROOT_ENV)
     if not candidate:
         if not required:
             return PROJECT_ROOT
-        raise ValueError("dataset root is required; set OCR_DATASET_ROOT or paths.dataset_root")
+        raise ValueError(f"dataset root is required; set {DATA_ROOT_ENV} or paths.dataset_root")
     return Path(candidate).expanduser()
 
 

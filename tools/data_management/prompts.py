@@ -17,6 +17,15 @@ _JINJA_ENV = Environment(
     keep_trailing_newline=True,
 )
 
+_TASK_DEFAULTS: dict[str, str] = {
+    "layout": "\nLayout Detection:",
+    "table": "{{ image_placeholder }}\nTable Recognition:",
+    "formula": "{{ image_placeholder }}\nFormula Recognition:",
+    "text": "{{ image_placeholder }}\nText Recognition:",
+    "diagram": "{{ image_placeholder }}\nImage Analysis:",
+    "seal": "{{ image_placeholder }}\nSeal Recognition:",
+}
+
 
 @dataclass(slots=True)
 class PromptConfig:
@@ -51,16 +60,16 @@ def _legacy_prompt_map(raw: dict[str, Any]) -> dict[str, str]:
     page = raw.get("page", {}) or {}
     region = raw.get("region", {}) or {}
     detection = raw.get("detection", {}) or {}
-    table_prompt = _first_rule_prompt(region, "table") or "{{ image_placeholder }}\nTable Recognition:"
-    formula_prompt = _first_rule_prompt(region, "formula") or "{{ image_placeholder }}\nFormula Recognition:"
-    seal_prompt = _first_rule_prompt(region, "seal") or "{{ image_placeholder }}\nSeal Recognition:"
-    text_prompt = _first_rule_prompt(region, "text") or "{{ image_placeholder }}\nText Recognition:"
+    table_prompt = _first_rule_prompt(region, "table") or _TASK_DEFAULTS["table"]
+    formula_prompt = _first_rule_prompt(region, "formula") or _TASK_DEFAULTS["formula"]
+    seal_prompt = _first_rule_prompt(region, "seal") or _TASK_DEFAULTS["seal"]
+    text_prompt = _first_rule_prompt(region, "text") or _TASK_DEFAULTS["text"]
     return {
-        "layout": _first_rule_prompt(page, "layout_detection") or detection.get("default") or "\nLayout Detection:",
+        "layout": _first_rule_prompt(page, "layout_detection") or detection.get("default") or _TASK_DEFAULTS["layout"],
         "table": table_prompt,
         "formula": formula_prompt,
         "text": text_prompt,
-        "diagram": "{{ image_placeholder }}\nImage Analysis:",
+        "diagram": _TASK_DEFAULTS["diagram"],
         "seal": seal_prompt,
         "page": page.get("default") or "{{ image_placeholder }}\nConvert the page image into markdown.",
     }
@@ -76,7 +85,7 @@ def _first_rule_prompt(section: dict[str, Any], token: str) -> str | None:
     return None
 
 
-def render_prompt(template: str, *, task: str, record: dict[str, Any], image_placeholder: str = "<image>") -> str:
+def _render_prompt(template: str, *, task: str, record: dict[str, Any], image_placeholder: str = "<image>") -> str:
     return _JINJA_ENV.from_string(template).render(
         task=task,
         record=record,
@@ -90,13 +99,5 @@ def resolve_prompt(config: PromptConfig, task: str, record: dict[str, Any]) -> t
     template_id = f"{task}_default_v1"
     template = config.by_task.get(task) or config.by_task.get("default")
     if not template:
-        defaults = {
-            "layout": "\nLayout Detection:",
-            "table": "{{ image_placeholder }}\nTable Recognition:",
-            "formula": "{{ image_placeholder }}\nFormula Recognition:",
-            "text": "{{ image_placeholder }}\nText Recognition:",
-            "diagram": "{{ image_placeholder }}\nImage Analysis:",
-            "seal": "{{ image_placeholder }}\nSeal Recognition:",
-        }
-        template = defaults.get(task, "{{ image_placeholder }}\nRecognize the document content.")
-    return render_prompt(template, task=task, record=record, image_placeholder=config.image_placeholder), template_id
+        template = _TASK_DEFAULTS.get(task, "{{ image_placeholder }}\nRecognize the document content.")
+    return _render_prompt(template, task=task, record=record, image_placeholder=config.image_placeholder), template_id

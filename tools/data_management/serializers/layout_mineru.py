@@ -23,8 +23,10 @@ class MinerULayoutSerializer(TargetSerializer):
         self.validate(canonical_record)
         target = canonical_record.get("target") or {}
         elements = target.get("elements") or []
-        width = float(context.get("width") or canonical_record.get("metadata", {}).get("width") or 1)
-        height = float(context.get("height") or canonical_record.get("metadata", {}).get("height") or 1)
+        width = float(context.get("width") or canonical_record.get("metadata", {}).get("width"))
+        height = float(context.get("height") or canonical_record.get("metadata", {}).get("height"))
+        if not width or not height:
+            raise ValueError(f"{self.name} requires page width and height in context or metadata")
         transform = context.get("image_transform") or {}
         scale_x = float(transform.get("scale_x") or transform.get("scale") or 1.0)
         scale_y = float(transform.get("scale_y") or transform.get("scale") or 1.0)
@@ -57,5 +59,5 @@ class MinerULayoutSerializer(TargetSerializer):
 
 def _to_grid(value: float, size: float) -> int:
     if size <= 0:
-        return 0
+        raise ValueError(f"grid size must be positive, got {size}")
     return max(0, min(1000, math.floor(1000 * value / size)))

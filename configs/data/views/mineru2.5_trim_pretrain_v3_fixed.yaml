@@ -1,0 +1,45 @@
+name: mineru2.5_trim_pretrain_v3_fixed
+description: "SFT pretraining view - Fintech fixed text/table, PubTable1M table, HaoY-Syn-Formula formula/text, and a deterministic 1M-record DocBank_500K text sample; MinerU2.5 prompts and OTSL table targets"
+stage: sft
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/mineru2.5_trim_pretrain_v3_fixed
+
+include:
+  - task: text
+    sources: [Fintech_Annual_Reports_fixed, HaoY-Syn-Formula, DocBank_500K]
+  - task: table
+    sources: [Fintech_Annual_Reports_fixed, PubTable1M_OTSL]
+  - task: formula
+    sources: [HaoY-Syn-Formula]
+
+sample:
+  - sources: [DocBank_500K]
+    tasks: [text]
+    level: record
+    count: 1000000
+    seed: 42
+
+target_serialization:
+  table: enhanced_otsl_v1
+  formula: latex_plain_v1
+  text: plain_text_v1
+
+image_policy:
+  materialization:
+    mode: nested_reference
+  filter:
+    max_aspect_ratio: 180
+
+shard_policy:
+  rows_per_shard: 10000
+
+split_policy:
+  level: document
+  seed: 42
+  train_ratio: 1.0
+  val_ratio: 0.0
+  test_ratio: 0.0

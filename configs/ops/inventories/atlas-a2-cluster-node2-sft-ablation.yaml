@@ -1,0 +1,25 @@
+cluster:
+  name: atlas-a2-cluster
+  ssh_user: root
+  default_container: verl-vlm-grpo
+  shared_paths:
+    code_root: /mnt/sas-server-1/shared/ocr-vlm-training
+    ops_state_root: /mnt/sas-server-1/shared/ocr-vlm-training-runs
+  nodes:
+    - name: node0
+      host: gpu-server-00
+      host_ip: 192.168.10.20
+      train_iface: enp67s0f0np0
+    - name: node1
+      host: gpu-server-01
+      host_ip: 192.168.10.22
+      train_iface: enp195s0f0np0
+    - name: node2
+      host: gpu-server-02
+      host_ip: 192.168.10.16
+      train_iface: enp67s0f0np0
+      container: verl-vlm-sft-ablation-node2
+    - name: node3
+      host: gpu-server-03
+      host_ip: 192.168.10.18
+      train_iface: enp67s0f0np0

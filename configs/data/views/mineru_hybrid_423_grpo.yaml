@@ -31,8 +31,7 @@ image_transform:
 
 image_policy:
   materialization:
-    mode: embedded_bytes
-    cache_assets: false
+    mode: embedded
 
 reward_profile:
   default: normalized_levenshtein_v1

@@ -1,0 +1,25 @@
+run:
+  id: sft-tmp-example
+  mode: sft
+  inventory: ../inventories/atlas-a2-example.yaml
+  nodes:
+    - node0
+    - node1
+  deployment:
+    method: tmp
+    release_id: sft-tmp-example
+    container_release_root: /tmp/ocr-vlm-training/releases
+  paths:
+    model_path: /mnt/models/MinerU2.5
+    train_file: /mnt/data/views/sft/train.parquet
+    val_file: /mnt/data/views/sft/val.parquet
+    ckpts_dir: /mnt/ckpts/ocr-vlm/sft-tmp-example
+    ocr_data_root: /mnt/data
+  training:
+    master_port: 29500
+    env:
+      NPUS_PER_NODE: 8
+      WANDB_MODE: offline
+      WANDB_PROJECT: ocr-vlm-training
+      EXPERIMENT_NAME: sft-tmp-example
+    args: []

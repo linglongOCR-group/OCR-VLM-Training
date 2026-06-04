@@ -1,9 +1,10 @@
 checkpoints/
 kernel_meta/
 outputs/
+/sources/
+logs/
 wandb.key
-.claude/
-.codex
+/artifacts/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

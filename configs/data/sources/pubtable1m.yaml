@@ -1,0 +1,48 @@
+dataset_name: PubTable1M_OTSL
+description: >-
+  PubTables-1M-OTSL — filtered version of PubTables-1M with ~710K table images.
+  The source also provides structural-only OTSL labels, but canonical export
+  uses html_with_text so the view builder can convert complete table content to
+  MinerU-style OTSL.
+
+source_path: sources/pubtable1M
+canonical_output: canonical
+
+original_source:
+  homepage: https://ds4sd.github.io
+  paper: https://arxiv.org/pdf/2305.03393
+  dataset: PubTables-1M (Smock et al.)
+  format_conversion: PubTables-1M-OTSL (Lysak et al.)
+
+license: other
+
+dataset_scale:
+  total_records: 709704
+  train: 522826
+  test_val: 186878
+
+data_dir: sources/pubtable1M/data
+
+adapter: pubtable
+annotation_format: "Parquet with embedded image bytes + html_with_text table markup"
+
+supported_tasks:
+  - table
+
+export_tasks:
+  - table
+
+processing:
+  owner: Boyu Hou
+  date: "2026-05-08"
+  known_issues: []
+  export_notes:
+    - "Images are embedded as bytes in image.bytes column."
+    - "The otsl column is structural-only and intentionally not used as the target."
+    - "Canonical table targets are exported from html_with_text as target.html."
+
+shard_size: 5000
+export:
+  num_workers: 32
+  worker_chunksize: 256
+skip_errors: false

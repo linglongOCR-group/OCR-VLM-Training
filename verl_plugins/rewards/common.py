@@ -2,29 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from tools.data_management.rewards.levenshtein import levenshtein_distance
+
 
 REWARD_NAME = "normalized_levenshtein"
 DEFAULT_REWARD_VERSION = "levenshtein_v1"
-
-
-def levenshtein_distance(prediction: str, ground_truth: str) -> int:
-    if prediction == ground_truth:
-        return 0
-    if not prediction:
-        return len(ground_truth)
-    if not ground_truth:
-        return len(prediction)
-
-    previous = list(range(len(ground_truth) + 1))
-    for i, pred_char in enumerate(prediction, start=1):
-        current = [i]
-        for j, truth_char in enumerate(ground_truth, start=1):
-            insertion = current[j - 1] + 1
-            deletion = previous[j] + 1
-            substitution = previous[j - 1] + (pred_char != truth_char)
-            current.append(min(insertion, deletion, substitution))
-        previous = current
-    return previous[-1]
 
 
 def normalized_levenshtein_reward(

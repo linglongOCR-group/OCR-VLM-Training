@@ -22,7 +22,7 @@ def read_yaml(path: str | Path) -> dict[str, Any]:
 def write_json(path: str | Path, payload: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def write_parquet(path: str | Path, rows: Iterable[dict[str, Any]]) -> int:

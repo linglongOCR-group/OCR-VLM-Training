@@ -1,0 +1,66 @@
+name: unirec40m_mineru_train_nested_reference
+description: "SFT training view - all UniRec40M region records for MinerU2.5 training, nested image references, train split only"
+stage: sft
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/unirec40m_mineru_train_nested_reference
+
+include:
+  - task: text
+    sources:
+      - UniRec40M_education
+      - UniRec40M_english
+      - UniRec40M_exam_paper
+      - UniRec40M_finance_report
+      - UniRec40M_formula
+      - UniRec40M_handwritten
+      - UniRec40M_newspaper
+      - UniRec40M_scene_text
+  - task: formula
+    sources:
+      - UniRec40M_education
+      - UniRec40M_english
+      - UniRec40M_exam_paper
+      - UniRec40M_finance_report
+      - UniRec40M_formula
+      - UniRec40M_handwritten
+      - UniRec40M_newspaper
+      - UniRec40M_scene_text
+  - task: table
+    sources:
+      - UniRec40M_education
+      - UniRec40M_english
+      - UniRec40M_exam_paper
+      - UniRec40M_finance_report
+      - UniRec40M_formula
+      - UniRec40M_handwritten
+      - UniRec40M_newspaper
+      - UniRec40M_scene_text
+
+target_serialization:
+  text: plain_text_v1
+  formula: latex_plain_v1
+  table: table_text_v1
+
+image_policy:
+  materialization:
+    mode: nested_reference
+
+shard_policy:
+  rows_per_shard: 10000
+
+split_policy:
+  level: document
+  seed: 42
+  train_ratio: 1.0
+  val_ratio: 0.0
+  test_ratio: 0.0
+
+execution:
+  view_build:
+    num_workers: 8
+    worker_batch_size: 512
+    schema_sample_size: 8192

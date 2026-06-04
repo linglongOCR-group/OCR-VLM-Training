@@ -1,0 +1,62 @@
+dataset_name: MinerU2.5_Pro_OmniDocBench_v1.5
+description: >-
+  MinerU 2.5 Pro annotations for OmniDocBench v1.5 page images. Each source
+  record is a single page with MinerU hybrid_auto outputs, page-level layout,
+  and region-level recognition targets.
+
+source_path: sources/MinerU2.5_Pro_OmniDocBench_v1.5
+source_readme: sources/MinerU2.5_Pro_OmniDocBench_v1.5/README.md
+canonical_output: canonical
+
+original_source:
+  dataset: OmniDocBench v1.5
+  producer: MinerU2.5 Pro
+  local_path: sources/MinerU2.5_Pro_OmniDocBench_v1.5
+
+license: null
+
+dataset_scale:
+  total_pages: 1355
+  annotation_dirs: 1355
+  images: 1355
+
+documented_layout:
+  images: images/
+  mineru_annotations: annotations/<sample_id>/hybrid_auto/
+
+mineru_root: sources/MinerU2.5_Pro_OmniDocBench_v1.5/annotations
+source_image_root: sources/MinerU2.5_Pro_OmniDocBench_v1.5/images
+mineru_subdir: hybrid_auto
+
+adapter: mineru
+annotation_format: MinerU hybrid_auto output
+image_extensions:
+  - .jpg
+  - .jpeg
+  - .png
+  - .webp
+
+supported_tasks:
+  - layout
+  - table
+  - formula
+  - text
+
+export_tasks:
+  - layout
+  - table
+  - formula
+  - text
+
+processing:
+  owner: Boyu Hou
+  date: "2026-05-02"
+  known_issues: []
+  export_notes:
+    - "Source inspected under OCR_DATA_ROOT=/mnt/server-2/datasets."
+    - "Existing canonical partition was removed before the clean export."
+    - "10 long annotation sample IDs resolve to source images by unique prefix or _2 collision suffix."
+
+shard_size: 10000
+allow_unreadable_images: false
+skip_errors: false

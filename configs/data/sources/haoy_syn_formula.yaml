@@ -1,0 +1,45 @@
+dataset_name: HaoY-Syn-Formula
+description: >-
+  HaoY synthetic formula/text recognition records in message format. Records
+  include MinerU-style formula and text recognition prompts with mirrored images
+  under this dataset root.
+
+source_path: sources/HaoY-Syn-Formula
+source_image_root: sources/HaoY-Syn-Formula/images
+data_file: 1022340.json
+image_materialization: source_reference
+canonical_output: canonical
+
+original_source:
+  local_path: sources/HaoY-Syn-Formula
+
+license: null
+
+dataset_scale:
+  total_records: 1022340
+
+adapter: hybrid_message
+annotation_format: Pre-built message format (LaTeX formula labels and plain text labels)
+image_extensions:
+  - .png
+  - .jpg
+  - .jpeg
+
+supported_tasks:
+  - formula
+  - text
+
+export_tasks:
+  - formula
+  - text
+
+processing:
+  owner: Boyu Hou
+  date: "2026-05-09"
+  known_issues:
+    - "JSON image paths preserve an older absolute mount; images are resolved by basename under source_image_root."
+  export_notes: []
+
+shard_size: 10000
+allow_unreadable_images: false
+skip_errors: false

@@ -1,0 +1,38 @@
+run:
+  id: sft-ablation-haoy-syn-formula-0531
+  mode: sft
+  inventory: ../inventories/atlas-a2-cluster.yaml
+  nodes:
+    - node1
+  deployment:
+    method: tmp
+    release_id: sft-ablation-haoy-syn-formula-0531
+    container_release_root: /tmp/ocr-vlm-training/releases
+  paths:
+    model_path: /mnt/sas-server-0/Models/saved-models/MinerU2.5-Trim-Pretrain/mineru25_trim_0501/global_step_8336
+    train_files: /mnt/sas-server-0/DataMgmt/views/ablation_haoy_syn_formula_nested_reference/train
+    val_files: /mnt/sas-server-0/DataMgmt/views/mineru25_pro_omnidocbench_v15_val_nested_reference_ar180/val
+    ckpts_dir: /mnt/sas-server-0/Models/saved-models/SFT-Ablations/mineru25_trim_0501_haoy_syn_formula_ablation_0531
+    ocr_data_root: /mnt/sas-server-0/DataMgmt
+  training:
+    master_port: 29533
+    env:
+      NPUS_PER_NODE: 8
+      NPU_PER_NODE: 8
+      TOTAL_NPU: 8
+      GLOBAL_BATCH_SIZE: 1024
+      MICRO_BATCH_SIZE_PER_GPU: 128
+      MAX_LENGTH: 16384
+      LR: 1e-5
+      FREEZE_VISION_TOWER: True
+      DATA_NUM_WORKERS: 4
+      RESUME_MODE: auto
+      SAVE_FREQ: 100
+      TEST_FREQ: 500
+      MAX_CKPT_TO_KEEP: 10
+      WANDB_PROJECT: mineru25_trim_sft_ablation_0531
+      PROJECT_NAME: mineru25_trim_sft_ablation_0531
+      EXPERIMENT_NAME: haoy_syn_formula_ablation_from_0501_gbs1024
+    args:
+      - engine.param_offload=false
+      - engine.optimizer_offload=false

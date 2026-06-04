@@ -213,7 +213,9 @@ class ViewRecord:
     prompt_template_id: str
     split: Literal["train", "val", "test"]
     view_image_asset_id: str | None = None
-    images: list | None = None
+    images: list[dict[str, str]] | None = None
+    images_bytes: list[bytes] | None = None
+    images_path: list[str] | None = None
     system_prompt: str | None = None
     messages: list | None = None
     data_source: str | None = None
@@ -252,9 +254,31 @@ class ViewRecord:
             if self.reward_payload is None and not self.reward_payload_id and not self.reward_payload_path:
                 raise ValueError("rlvr view records require reward payload information")
 
+    _NULLABLE_FIELDS = (
+        "region_id",
+        "view_image_asset_id",
+        "images",
+        "images_bytes",
+        "images_path",
+        "system_prompt",
+        "messages",
+        "data_source",
+        "reward_model",
+        "reward_profile_id",
+        "reward_payload",
+        "reward_payload_id",
+        "reward_payload_path",
+        "answer_key",
+        "verifier_metadata",
+    )
+
     def to_dict(self) -> JsonDict:
         self.validate()
-        return asdict(self)
+        data = asdict(self)
+        for field_name in self._NULLABLE_FIELDS:
+            if data.get(field_name) is None:
+                data.pop(field_name, None)
+        return data
 
 
 @dataclass(slots=True)
@@ -264,6 +288,12 @@ class RewardResult:
     passed: bool | None
     details: JsonDict
     error: str | None = None
+
+    def validate(self) -> None:
+        if not isinstance(self.score, (int, float)):
+            raise ValueError(f"score must be numeric, got {type(self.score).__name__}")
+        if self.details is not None and not isinstance(self.details, dict):
+            raise ValueError(f"details must be a dict or None, got {type(self.details).__name__}")
 
     def to_dict(self) -> JsonDict:
         return asdict(self)

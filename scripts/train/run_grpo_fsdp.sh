@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/cann-8.5.0/share/info/ascendnpu-ir/bin/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
+
+set -euo pipefail
 
 PROJECT_ROOT=${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 export PROJECT_ROOT
@@ -50,6 +50,7 @@ TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-null}
 RESUME_MODE=${RESUME_MODE:-auto}
 VALIDATE_GRPO_VIEW=${VALIDATE_GRPO_VIEW:-True}
 VALIDATE_GRPO_MAX_ROWS_PER_FILE=${VALIDATE_GRPO_MAX_ROWS_PER_FILE:-1000}
+OCR_DATA_ROOT=${OCR_DATA_ROOT:-}
 DISABLE_FLASHCOMM_FOR_TP1=${DISABLE_FLASHCOMM_FOR_TP1:-True}
 ENABLE_ASCEND_PERF_ENV=${ENABLE_ASCEND_PERF_ENV:-False}
 ENABLE_JEMALLOC=${ENABLE_JEMALLOC:-False}
@@ -84,14 +85,17 @@ if [ "${DISABLE_FLASHCOMM_FOR_TP1}" = "True" ] && [ "${ROLLOUT_TP_SIZE}" -le 1 ]
 fi
 
 if [ "${VALIDATE_GRPO_VIEW}" = "True" ]; then
+  VALIDATE_IMAGE_ARGS=()
   if [ "${USE_VALIDATION}" = "True" ]; then
     python -m tools.data_management.validate_grpo_view \
       --max-rows-per-file="${VALIDATE_GRPO_MAX_ROWS_PER_FILE}" \
+      "${VALIDATE_IMAGE_ARGS[@]}" \
       "${TRAIN_FILE}" \
       "${VAL_FILE}"
   else
     python -m tools.data_management.validate_grpo_view \
       --max-rows-per-file="${VALIDATE_GRPO_MAX_ROWS_PER_FILE}" \
+      "${VALIDATE_IMAGE_ARGS[@]}" \
       "${TRAIN_FILE}"
   fi
 fi
@@ -106,7 +110,10 @@ python -m verl.trainer.main_ppo \
   data.train_files="${TRAIN_FILE}" \
   data.val_files="${VAL_FILE}" \
   data.prompt_key=prompt \
-  data.image_key=images \
+  data.image_key=runtime_images \
+  +data.data_root="${OCR_DATA_ROOT}" \
+  data.custom_cls.path="${PROJECT_ROOT}/tools/data_management/runtime/verl_multimodal_dataset.py" \
+  data.custom_cls.name=OcrRLHFDataset \
   data.reward_fn_key=data_source \
   data.train_batch_size="${TRAIN_BATCH_SIZE}" \
   data.max_prompt_length="${MAX_PROMPT_LENGTH:-2048}" \

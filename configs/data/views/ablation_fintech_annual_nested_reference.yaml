@@ -1,0 +1,66 @@
+name: ablation_fintech_annual_nested_reference
+description: "SFT ablation view isolating Fintech_Annual (canonical source Fintech_Annual_Reports_fixed) with DocBank_500K and UniRec_990K balancing data; nested image references"
+stage: sft
+model_family: mineru2.5
+prompt_profile: mineru2.5
+
+paths:
+  canonical_root: canonical
+  view_root: views/ablation_fintech_annual_nested_reference
+
+include:
+  - task: table
+    sources: [DocBank_500K, Fintech_Annual_Reports_fixed]
+  - task: formula
+    sources: [DocBank_500K]
+  - task: text
+    sources: [DocBank_500K, UniRec_990K, Fintech_Annual_Reports_fixed]
+
+sample:
+  - sources: [DocBank_500K]
+    tasks: [formula]
+    level: record
+    count: 500000
+    seed: 20260531
+  - sources: [DocBank_500K]
+    tasks: [text]
+    level: record
+    count: 1000000
+    seed: 20260531
+  - sources: [UniRec_990K]
+    tasks: [text]
+    level: record
+    count: 500000
+    seed: 20260531
+  - sources: [Fintech_Annual_Reports_fixed]
+    tasks: [text]
+    level: record
+    count: 2000000
+    seed: 20260531
+
+target_serialization:
+  table: enhanced_otsl_v1
+  formula: latex_plain_v1
+  text: plain_text_v1
+
+image_policy:
+  materialization:
+    mode: nested_reference
+  filter:
+    max_aspect_ratio: 180
+
+shard_policy:
+  rows_per_shard: 10000
+
+split_policy:
+  level: document
+  seed: 20260531
+  train_ratio: 1.0
+  val_ratio: 0.0
+  test_ratio: 0.0
+
+execution:
+  view_build:
+    num_workers: 8
+    worker_batch_size: 512
+    schema_sample_size: 8192
