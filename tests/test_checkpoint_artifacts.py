@@ -79,3 +79,26 @@ def test_checkpoint_registration_rejects_missing_directory(tmp_path):
         assert "missing" in str(exc)
     else:
         raise AssertionError("missing checkpoint directory should fail")
+
+
+def test_kd_sft_checkpoint_metadata_records_teacher_student_sources(tmp_path):
+    ckpt_dir = tmp_path / "global_step_20"
+    ckpt_dir.mkdir()
+    metadata = CheckpointArtifactMetadata(
+        checkpoint_name="global_step_20",
+        checkpoint_dir=ckpt_dir,
+        global_step=20,
+        training_mode="kd_sft",
+        model_id="student-model",
+        config_hash="hash",
+        git_commit="commit",
+        student_source="/mnt/models/student",
+        teacher_source="/mnt/models/teacher",
+    )
+
+    payload = metadata.to_wandb_metadata()
+
+    assert payload["training_mode"] == "kd_sft"
+    assert payload["student_source"] == "/mnt/models/student"
+    assert payload["teacher_source"] == "/mnt/models/teacher"
+    assert payload["local_checkpoint_uri"] == f"file://{ckpt_dir.resolve()}"

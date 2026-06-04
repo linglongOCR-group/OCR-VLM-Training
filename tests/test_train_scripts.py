@@ -67,3 +67,37 @@ def test_multinode_sft_script_does_not_keep_old_default_data_paths():
     assert "/data/mineru25_sft/train.parquet" not in script
     assert "/data/mineru25_sft/val.parquet" not in script
     assert "run_mineru25_sft_dual_node.sh" not in script
+
+
+def test_multinode_kd_sft_script_uses_repo_local_kd_entrypoint():
+    script = Path("scripts/train/run_multinode_kd_sft.sh").read_text()
+
+    required_snippets = [
+        'TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:?TEACHER_MODEL_PATH is required}"',
+        '-m verl_plugins.trainers.kd_sft_trainer',
+        'importlib.import_module("verl_plugins.trainers.kd_sft_trainer")',
+        '+kd.teacher.path="${TEACHER_MODEL_PATH}"',
+        '+kd.logits.top_k="${KD_TOP_K}"',
+        '+kd.logits.temperature="${KD_TEMPERATURE}"',
+        '+kd.logits.loss_type="${KD_LOGIT_LOSS_TYPE}"',
+        '+kd.hidden.layer_map="${KD_HIDDEN_LAYER_MAP}"',
+        '+kd.schedules.logits.type=linear_warmup_constant',
+        '+kd.schedules.hidden.type=linear_warmup_hold_decay',
+        '"$@"',
+    ]
+
+    for snippet in required_snippets:
+        assert snippet in script
+    assert 'KD_HIDDEN_LAYER_MAP="${KD_HIDDEN_LAYER_MAP:-' not in script
+    assert "KD_HIDDEN_LAYER_MAP='[{student_hidden_index:1,teacher_hidden_index:1}]'" in script
+
+
+def test_kd_sft_config_uses_repo_local_kd_entrypoint_and_default_layer_map():
+    config = Path("configs/train/verl/sft/kd_qwen2_5_vl_fsdp.yaml").read_text()
+
+    assert "entrypoint: verl_plugins.trainers.kd_sft_trainer" in config
+    assert "teacher:" in config
+    assert "path: ${oc.env:TEACHER_MODEL_PATH}" in config
+    assert "loss_type: ${oc.env:KD_LOGIT_LOSS_TYPE,renormalized_top_k_forward_kl}" in config
+    assert "student_hidden_index" in config
+    assert "teacher_hidden_index" in config

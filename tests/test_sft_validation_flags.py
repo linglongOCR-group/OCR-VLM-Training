@@ -5,7 +5,7 @@ import torch
 from omegaconf import OmegaConf
 
 from verl_plugins.trainers import sft_trainer
-from verl_plugins.trainers.sft_trainer import OcrSFTTrainer
+from verl_plugins.trainers.sft_trainer import OcrSFTTrainer, _normalize_training_metrics
 
 
 class FakeEngine:
@@ -128,3 +128,21 @@ def test_validation_flags_require_validation_dataloader():
 
     with pytest.raises(ValueError, match="requires data.val_files"):
         trainer.fit()
+
+
+def test_normalize_training_metrics_reduces_kd_metrics_to_wandb_scalars():
+    metrics = _normalize_training_metrics(
+        {
+            "train/loss_sft_raw": [[torch.tensor(1.0), torch.tensor(2.0)], [torch.tensor(3.0), torch.tensor(4.0)]],
+            "train/loss_logit_weighted": [torch.tensor(0.1), torch.tensor(0.2)],
+            "train/lambda_logit": [[0.5, 0.5], [0.5, 0.5]],
+            "train/kd_logits_loss_type": [["renormalized_top_k_forward_kl"], ["renormalized_top_k_forward_kl"]],
+            "train/aux_accuracy": [[0.25, 0.75], [0.5, 1.0]],
+        }
+    )
+
+    assert metrics["train/loss_sft_raw"] == pytest.approx(5.0)
+    assert metrics["train/loss_logit_weighted"] == pytest.approx(0.3)
+    assert metrics["train/lambda_logit"] == pytest.approx(0.5)
+    assert metrics["train/kd_logits_loss_type"] == "renormalized_top_k_forward_kl"
+    assert metrics["train/aux_accuracy"] == pytest.approx(0.625)

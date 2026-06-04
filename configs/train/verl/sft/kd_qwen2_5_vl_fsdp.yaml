@@ -1,0 +1,71 @@
+entrypoint: verl_plugins.trainers.kd_sft_trainer
+custom_trainer: verl_plugins.trainers.kd_sft_trainer
+backend: fsdp
+model:
+  path: ${oc.env:MODEL_PATH}
+  use_remove_padding: true
+  freeze_vision_tower: ${oc.env:FREEZE_VISION_TOWER,False}
+  trust_remote_code: true
+  enable_gradient_checkpointing: true
+data:
+  train_files: ${oc.env:TRAIN_FILE}
+  val_files: ${oc.env:VAL_FILE,null}
+  train_batch_size: ${oc.env:TRAIN_BATCH_SIZE,64}
+  micro_batch_size_per_gpu: ${oc.env:MICRO_BATCH_SIZE_PER_GPU,1}
+  max_length: ${oc.env:MAX_LENGTH,4096}
+  pad_mode: no_padding
+  messages_key: messages
+  image_key: runtime_images
+  data_root: ${oc.env:OCR_DATA_ROOT,}
+  custom_cls:
+    path: ${oc.env:PROJECT_ROOT}/tools/data_management/runtime/verl_multimodal_dataset.py
+    name: OcrMultiTurnSFTDataset
+trainer:
+  project_name: ${oc.env:WANDB_PROJECT,ocr-vlm-training}
+  experiment_name: ${oc.env:EXPERIMENT_NAME,kd-sft-qwen2-5-vl-fsdp}
+  logger: ["console", "wandb"]
+  nnodes: ${oc.env:NNODES,1}
+  n_gpus_per_node: ${oc.env:NPUS_PER_NODE,8}
+  default_local_dir: ${oc.env:CKPTS_DIR,checkpoints/kd-sft-qwen2-5-vl-fsdp}
+  resume_mode: ${oc.env:RESUME_MODE,auto}
+  validate_only: ${oc.env:VALIDATE_ONLY,False}
+  val_before_train: ${oc.env:VAL_BEFORE_TRAIN,False}
+kd:
+  enabled: true
+  teacher:
+    path: ${oc.env:TEACHER_MODEL_PATH}
+    strategy: fsdp2
+  precheck:
+    required: true
+    mode: ${oc.env:KD_PRECHECK_MODE,config}
+    allow_dry_run_batch: true
+  logits:
+    enabled: true
+    mode: top_k
+    top_k: ${oc.env:KD_TOP_K,64}
+    temperature: ${oc.env:KD_TEMPERATURE,2.0}
+    loss_type: ${oc.env:KD_LOGIT_LOSS_TYPE,renormalized_top_k_forward_kl}
+  hidden:
+    enabled: true
+    loss_type: ${oc.env:KD_HIDDEN_LOSS_TYPE,normalized_mse}
+    token_mask: response
+    layer_map:
+      - student_hidden_index: ${oc.env:KD_STUDENT_HIDDEN_INDEX,1}
+        teacher_hidden_index: ${oc.env:KD_TEACHER_HIDDEN_INDEX,1}
+  schedules:
+    sft:
+      type: constant
+      value: 1.0
+    logits:
+      type: linear_warmup_constant
+      start: 0.0
+      peak: ${oc.env:KD_LOGIT_WEIGHT,0.3}
+      warmup_steps: ${oc.env:KD_LOGIT_WARMUP_STEPS,200}
+    hidden:
+      type: linear_warmup_hold_decay
+      start: 0.0
+      peak: ${oc.env:KD_HIDDEN_WEIGHT,0.1}
+      warmup_steps: ${oc.env:KD_HIDDEN_WARMUP_STEPS,200}
+      hold_steps: ${oc.env:KD_HIDDEN_HOLD_STEPS,2000}
+      decay_steps: ${oc.env:KD_HIDDEN_DECAY_STEPS,1000}
+      end: 0.0

@@ -19,6 +19,9 @@ class CheckpointArtifactMetadata:
     model_id: str
     config_hash: str
     git_commit: str
+    student_source: str | None = None
+    teacher_source: str | None = None
+    local_checkpoint_uri: str | None = None
     epoch: int | None = None
     optimizer_state_included: bool = True
     trainer_state_included: bool = True
@@ -30,6 +33,7 @@ class CheckpointArtifactMetadata:
         metadata = asdict(self)
         metadata["checkpoint_dir"] = str(checkpoint_dir)
         metadata["checkpoint_uri"] = f"file://{checkpoint_dir}"
+        metadata["local_checkpoint_uri"] = metadata["local_checkpoint_uri"] or metadata["checkpoint_uri"]
         metadata["save_timestamp"] = datetime.now(UTC).isoformat()
         return metadata
 
@@ -80,9 +84,11 @@ def main() -> None:
     register.add_argument("--checkpoint-dir", required=True)
     register.add_argument("--checkpoint-name")
     register.add_argument("--global-step", type=int, required=True)
-    register.add_argument("--training-mode", choices=["sft", "grpo"], required=True)
+    register.add_argument("--training-mode", choices=["sft", "grpo", "kd_sft"], required=True)
     register.add_argument("--model-id", required=True)
     register.add_argument("--config-hash", required=True)
+    register.add_argument("--student-source", default=None)
+    register.add_argument("--teacher-source", default=None)
     register.add_argument("--git-commit", default=None)
     register.add_argument("--wandb-project", required=True)
     register.add_argument("--wandb-entity", default=None)
@@ -107,6 +113,8 @@ def main() -> None:
             training_mode=args.training_mode,
             model_id=args.model_id,
             config_hash=args.config_hash,
+            student_source=args.student_source,
+            teacher_source=args.teacher_source,
             git_commit=args.git_commit or git_commit(),
         )
         register_checkpoint_reference(run=run, metadata=metadata, wandb_module=wandb)
