@@ -54,6 +54,9 @@ OCR_DATA_ROOT=${OCR_DATA_ROOT:-}
 DISABLE_FLASHCOMM_FOR_TP1=${DISABLE_FLASHCOMM_FOR_TP1:-True}
 ENABLE_ASCEND_PERF_ENV=${ENABLE_ASCEND_PERF_ENV:-False}
 ENABLE_JEMALLOC=${ENABLE_JEMALLOC:-False}
+REWARD_PROFILE="${REWARD_PROFILE:-levenshtein_only_v1}"
+DEFAULT_REWARD_PROFILE="${DEFAULT_REWARD_PROFILE:-normalized_levenshtein_v1}"
+CDM_REWARD_PROFILE="${CDM_REWARD_PROFILE:-cdm_katex_v1}"
 
 if [ "${ENABLE_ASCEND_PERF_ENV}" = "True" ]; then
   export TASK_QUEUE_ENABLE=${TASK_QUEUE_ENABLE:-2}
@@ -98,6 +101,30 @@ if [ "${VALIDATE_GRPO_VIEW}" = "True" ]; then
       "${VALIDATE_IMAGE_ARGS[@]}" \
       "${TRAIN_FILE}"
   fi
+fi
+
+REWARD_ARGS=(
+  +reward.custom_reward_function.reward_kwargs.reward_profile="${REWARD_PROFILE}"
+  +reward.custom_reward_function.reward_kwargs.routing.default="${DEFAULT_REWARD_PROFILE}"
+  +reward.custom_reward_function.reward_kwargs.rewards."${DEFAULT_REWARD_PROFILE}".type=normalized_levenshtein
+  +reward.custom_reward_function.reward_kwargs.rewards."${DEFAULT_REWARD_PROFILE}".version=levenshtein_v1
+)
+if [ "${REWARD_PROFILE}" = "formula_cdm_v1" ]; then
+  python -m tools.training_ops.grpo_cdm_preflight \
+    --routing-default="${DEFAULT_REWARD_PROFILE}" \
+    --formula-profile="${CDM_REWARD_PROFILE}" \
+    --cdm-profile="${CDM_REWARD_PROFILE}" \
+    --cdm-preflight-required="${CDM_REWARD_PREFLIGHT_REQUIRED:-True}"
+  REWARD_ARGS+=(
+    +reward.custom_reward_function.reward_kwargs.routing.by_task.formula="${CDM_REWARD_PROFILE}"
+    +reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".type=cdm_latex_render
+    +reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".version=cdm_katex_v1
+    +reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".service_url="${CDM_REWARD_URL:-http://127.0.0.1:8765}"
+    +reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".timeout_ms="${CDM_REWARD_TIMEOUT_MS:-1000}"
+    +reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".fail_score="${CDM_REWARD_FAIL_SCORE:-0.0}"
+    +reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".expected_version="${CDM_REWARD_EXPECTED_VERSION:-cdm_katex_v1}"
+    +reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".preflight_required="${CDM_REWARD_PREFLIGHT_REQUIRED:-True}"
+  )
 fi
 
 RAY_ARGS=()
@@ -158,6 +185,7 @@ python -m verl.trainer.main_ppo \
   reward.custom_reward_function.path="${PROJECT_ROOT}/verl_plugins/rewards/aggregate.py" \
   reward.custom_reward_function.name=compute_score \
   +reward.custom_reward_function.reward_kwargs.reward_version=levenshtein_v1 \
+  "${REWARD_ARGS[@]}" \
   trainer.logger="${TRAINER_LOGGER}" \
   trainer.project_name="${WANDB_PROJECT}" \
   trainer.experiment_name="${EXPERIMENT_NAME}" \

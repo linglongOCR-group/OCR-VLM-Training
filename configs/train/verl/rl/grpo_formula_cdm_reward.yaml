@@ -1,0 +1,23 @@
+reward:
+  custom_reward_function:
+    path: ${oc.env:PROJECT_ROOT}/verl_plugins/rewards/aggregate.py
+    name: compute_score
+    reward_kwargs:
+      reward_version: levenshtein_v1
+      reward_profile: formula_cdm_v1
+      routing:
+        default: normalized_levenshtein_v1
+        by_task:
+          formula: cdm_katex_v1
+      rewards:
+        normalized_levenshtein_v1:
+          type: normalized_levenshtein
+          version: levenshtein_v1
+        cdm_katex_v1:
+          type: cdm_latex_render
+          version: cdm_katex_v1
+          service_url: ${oc.env:CDM_REWARD_URL,http://127.0.0.1:8765}
+          timeout_ms: ${oc.env:CDM_REWARD_TIMEOUT_MS,1000}
+          fail_score: ${oc.env:CDM_REWARD_FAIL_SCORE,0.0}
+          expected_version: ${oc.env:CDM_REWARD_EXPECTED_VERSION,cdm_katex_v1}
+          preflight_required: ${oc.env:CDM_REWARD_PREFLIGHT_REQUIRED,True}

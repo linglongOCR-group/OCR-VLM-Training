@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 
 def test_multinode_sft_script_uses_ocr_multimodal_dataset_cls():
     script = Path("scripts/train/run_multinode_sft.sh").read_text()
@@ -101,3 +103,44 @@ def test_kd_sft_config_uses_repo_local_kd_entrypoint_and_default_layer_map():
     assert "loss_type: ${oc.env:KD_LOGIT_LOSS_TYPE,renormalized_top_k_forward_kl}" in config
     assert "student_hidden_index" in config
     assert "teacher_hidden_index" in config
+
+
+def test_grpo_script_runs_cdm_preflight_only_for_cdm_reward_profiles():
+    script = Path("scripts/train/run_grpo_fsdp.sh").read_text()
+
+    assert 'REWARD_PROFILE="${REWARD_PROFILE:-levenshtein_only_v1}"' in script
+    assert 'CDM_REWARD_PROFILE="${CDM_REWARD_PROFILE:-cdm_katex_v1}"' in script
+    assert 'if [ "${REWARD_PROFILE}" = "formula_cdm_v1" ]; then' in script
+    assert "python -m tools.training_ops.grpo_cdm_preflight" in script
+    assert '--routing-default="${DEFAULT_REWARD_PROFILE}"' in script
+    assert '--formula-profile="${CDM_REWARD_PROFILE}"' in script
+    assert '--cdm-profile="${CDM_REWARD_PROFILE}"' in script
+    assert '--cdm-preflight-required="${CDM_REWARD_PREFLIGHT_REQUIRED:-True}"' in script
+    assert '+reward.custom_reward_function.reward_kwargs.routing.default="${DEFAULT_REWARD_PROFILE}"' in script
+    assert '+reward.custom_reward_function.reward_kwargs.routing.by_task.formula="${CDM_REWARD_PROFILE}"' in script
+    assert '+reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".type=cdm_latex_render' in script
+    assert '+reward.custom_reward_function.reward_kwargs.rewards."${CDM_REWARD_PROFILE}".preflight_required="${CDM_REWARD_PREFLIGHT_REQUIRED:-True}"' in script
+
+
+def test_cdm_grpo_reward_config_uses_explicit_routing_profiles():
+    config = yaml.safe_load(Path("configs/train/verl/rl/grpo_formula_cdm_reward.yaml").read_text())
+    reward_kwargs = config["reward"]["custom_reward_function"]["reward_kwargs"]
+
+    assert reward_kwargs["reward_profile"] == "formula_cdm_v1"
+    assert reward_kwargs["routing"] == {
+        "default": "normalized_levenshtein_v1",
+        "by_task": {"formula": "cdm_katex_v1"},
+    }
+    assert reward_kwargs["rewards"]["normalized_levenshtein_v1"] == {
+        "type": "normalized_levenshtein",
+        "version": "levenshtein_v1",
+    }
+    assert reward_kwargs["rewards"]["cdm_katex_v1"] == {
+        "type": "cdm_latex_render",
+        "version": "cdm_katex_v1",
+        "service_url": "${oc.env:CDM_REWARD_URL,http://127.0.0.1:8765}",
+        "timeout_ms": "${oc.env:CDM_REWARD_TIMEOUT_MS,1000}",
+        "fail_score": "${oc.env:CDM_REWARD_FAIL_SCORE,0.0}",
+        "expected_version": "${oc.env:CDM_REWARD_EXPECTED_VERSION,cdm_katex_v1}",
+        "preflight_required": "${oc.env:CDM_REWARD_PREFLIGHT_REQUIRED,True}",
+    }

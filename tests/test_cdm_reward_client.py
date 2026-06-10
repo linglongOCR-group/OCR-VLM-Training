@@ -140,7 +140,7 @@ def test_preflight_runs_health_and_tiny_scoring_probe():
         "http://cdm.test/health",
         "http://cdm.test/score",
     ]
-    assert request_json(opener.requests[1]) == {"prediction": "x", "reference": "x"}
+    assert request_json(opener.requests[1]) == {"prediction": r"\frac{1}{2}", "reference": r"\frac{1}{2}"}
 
 
 @pytest.mark.parametrize(
@@ -235,6 +235,15 @@ def test_timeout_returns_fail_score_diagnostic_result():
     assert result["diagnostics"]["error_type"] == "timeout"
 
 
+def test_client_accepts_numeric_string_fail_score():
+    opener = FakeOpener([FakeHttpResponse({"score": 0.25, "diagnostics": {"render_status": "ok"}})])
+    client = CdmLatexRenderClient(service_url="http://cdm.test", fail_score="0.0", opener=opener)
+
+    result = client.score(prediction="x", ground_truth="x", reward_version="cdm_katex_v1")
+
+    assert result["reward_total"] == 0.25
+
+
 def test_malformed_json_returns_fail_score_diagnostic_result():
     opener = FakeOpener([FakeHttpResponse(b"not json")])
     client = CdmLatexRenderClient(service_url="http://cdm.test", fail_score=0.0, opener=opener)
@@ -265,6 +274,47 @@ def test_out_of_range_score_returns_fail_score_diagnostic_result():
     assert result["reward_total"] == 0.0
     assert result["diagnostics"]["error_type"] == "malformed_score"
     assert "out of range" in result["diagnostics"]["message"]
+
+
+@pytest.mark.parametrize("score", ["nan", float("nan")])
+def test_non_finite_score_returns_zero_malformed_score(score):
+    opener = FakeOpener([FakeHttpResponse({"score": score})])
+    client = CdmLatexRenderClient(service_url="http://cdm.test", fail_score=0.0, opener=opener)
+
+    result = client.score(prediction="x", ground_truth="x", reward_version="cdm_katex_v1")
+
+    assert result["reward_total"] == 0.0
+    assert result["diagnostics"]["error_type"] == "malformed_score"
+    assert "finite" in result["diagnostics"]["message"]
+
+
+def test_compute_score_routes_cdm_profile_with_string_fail_score_to_http_client():
+    opener = FakeOpener([FakeHttpResponse({"score": 0.5, "diagnostics": {"render_status": "ok"}})])
+
+    result = compute_score(
+        data_source="ocr_vlm:region:formula",
+        solution_str="x+1",
+        ground_truth="x+2",
+        extra_info={"task_type": "formula"},
+        routing={"default": "cdm"},
+        rewards={
+            "cdm": {
+                "type": "cdm_latex_render",
+                "service_url": "http://cdm.test",
+                "timeout_ms": 1500,
+                "fail_score": "0.0",
+                "version": "cdm_katex_v1",
+                "expected_version": "cdm_katex_v1",
+                "opener": opener,
+            }
+        },
+    )
+
+    assert result["score"] == result["reward_total"] == 0.5
+    assert result["reward_name"] == "cdm_latex_render"
+    assert result["reward_version"] == "cdm_katex_v1"
+    assert result["reward_profile_id"] == "cdm"
+    assert request_json(opener.requests[0]) == {"prediction": "x+1", "reference": "x+2"}
 
 
 def test_compute_score_routes_cdm_profile_to_http_client():

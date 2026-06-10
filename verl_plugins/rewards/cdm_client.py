@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import socket
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -60,7 +61,7 @@ class CdmLatexRenderClient:
     def preflight(self) -> None:
         self.check_health()
         try:
-            payload = self._request_json("POST", "score", {"prediction": "x", "reference": "x"})
+            payload = self._request_json("POST", "score", {"prediction": r"\frac{1}{2}", "reference": r"\frac{1}{2}"})
             reward_total, _diagnostics = self._normalize_score_payload(payload)
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
             raise CdmPreflightError(f"CDM scoring probe failed: {_preflight_error_message(exc)}") from exc
@@ -143,9 +144,19 @@ def _reward_result(*, reward_total: float, reward_version: str, diagnostics: dic
 
 
 def _coerce_score(value: Any, *, field_name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
         raise ValueError(f"{field_name} must be numeric")
-    score = float(value)
+    if isinstance(value, str):
+        try:
+            score = float(value)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be numeric") from exc
+    elif isinstance(value, (int, float)):
+        score = float(value)
+    else:
+        raise ValueError(f"{field_name} must be numeric")
+    if not math.isfinite(score):
+        raise ValueError(f"{field_name} must be finite")
     if score < 0.0 or score > 1.0:
         raise ValueError(f"{field_name} out of range [0, 1]")
     return score

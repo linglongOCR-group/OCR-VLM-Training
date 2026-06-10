@@ -31,12 +31,12 @@
 
 ## 4. GRPO Configuration and Launch Preflight
 
-- [ ] 4.1 Add an opt-in CDM-enabled GRPO reward config or script configuration using explicit runtime routing profiles
-- [ ] 4.2 Add environment/config support for `CDM_REWARD_URL`, timeout, fail score, expected version, and preflight-required behavior
-- [ ] 4.3 Add GRPO launch preflight that detects CDM reward routes and checks CDM service health before training
-- [ ] 4.4 Add GRPO launch preflight scoring probe for a small known Formula pair
-- [ ] 4.5 Ensure Levenshtein-only GRPO launches do not require the CDM service
-- [ ] 4.6 Add tests for CDM-enabled preflight success, CDM preflight failure, and Levenshtein-only launch compatibility
+- [x] 4.1 Add an opt-in CDM-enabled GRPO reward config or script configuration using explicit runtime routing profiles
+- [x] 4.2 Add environment/config support for `CDM_REWARD_URL`, timeout, fail score, expected version, and preflight-required behavior
+- [x] 4.3 Add GRPO launch preflight that detects CDM reward routes and checks CDM service health before training
+- [x] 4.4 Add GRPO launch preflight scoring probe for a small known Formula pair
+- [x] 4.5 Ensure Levenshtein-only GRPO launches do not require the CDM service
+- [x] 4.6 Add tests for CDM-enabled preflight success, CDM preflight failure, and Levenshtein-only launch compatibility
 
 ## 5. End-to-End Validation
 
