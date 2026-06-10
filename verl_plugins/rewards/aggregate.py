@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from verl_plugins.rewards.cdm_client import CdmLatexRenderClient
 from verl_plugins.rewards.common import DEFAULT_REWARD_VERSION, normalized_levenshtein_reward
 
 RewardFn = Callable[..., dict[str, Any]]
@@ -16,14 +17,27 @@ def cdm_latex_render_reward(
     metadata: dict[str, Any] | None = None,
     reward_version: str = "cdm_katex_v1",
     client: Any | None = None,
+    service_url: str | None = None,
+    timeout_ms: int | float = 1000,
+    fail_score: float = 0.0,
+    expected_version: str | None = None,
+    opener: Any | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    if client is None and service_url:
+        client = CdmLatexRenderClient(
+            service_url=service_url,
+            timeout_ms=timeout_ms,
+            fail_score=fail_score,
+            expected_version=expected_version,
+            opener=opener,
+        )
     if client is None:
         return {
             "reward_total": 0.0,
             "reward_name": "cdm_latex_render",
             "reward_version": reward_version,
-            "diagnostic": "cdm_latex_render reward client is not configured",
+            "diagnostics": {"error_type": "configuration_error", "message": "cdm_latex_render reward client is not configured"},
         }
     return client(
         prediction=prediction,

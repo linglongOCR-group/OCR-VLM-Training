@@ -9,12 +9,12 @@
 
 ## 2. Python CDM Client
 
-- [ ] 2.1 Implement a Python CDM HTTP client with configurable service URL, timeout, fail score, and expected version
-- [ ] 2.2 Implement service health/preflight checks for `/health` and a tiny scoring probe
-- [ ] 2.3 Implement `/score` request handling for prediction/reference LaTeX pairs
-- [ ] 2.4 Validate and normalize service responses, including score range checks and compact diagnostics
-- [ ] 2.5 Convert connection failures, timeouts, malformed JSON, and malformed score responses into zero-reward diagnostic results during sample scoring
-- [ ] 2.6 Add mocked client tests for health success, wrong version, browser-not-ready, score success, structured render error, HTTP error, timeout, malformed JSON, missing score, and out-of-range score
+- [x] 2.1 Implement a Python CDM HTTP client with configurable service URL, timeout, fail score, and expected version
+- [x] 2.2 Implement service health/preflight checks for `/health` and a tiny scoring probe
+- [x] 2.3 Implement `/score` request handling for prediction/reference LaTeX pairs
+- [x] 2.4 Validate and normalize service responses, including score range checks and compact diagnostics
+- [x] 2.5 Convert connection failures, timeouts, malformed JSON, and malformed score responses into zero-reward diagnostic results during sample scoring
+- [x] 2.6 Add mocked client tests for health success, wrong version, browser-not-ready, score success, structured render error, HTTP error, timeout, malformed JSON, missing score, and out-of-range score
 
 ## 3. CDM Service
 
