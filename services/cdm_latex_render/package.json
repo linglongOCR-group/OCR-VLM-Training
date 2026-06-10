@@ -1,0 +1,21 @@
+{
+  "name": "cdm-latex-render",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local CDM-style LaTeX render reward service for formula RLVR.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "katex": "^0.16.10",
+    "playwright": "^1.44.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0"
+  }
+}

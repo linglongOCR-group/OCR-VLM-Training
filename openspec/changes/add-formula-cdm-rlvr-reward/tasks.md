@@ -18,16 +18,16 @@
 
 ## 3. CDM Service
 
-- [ ] 3.1 Create the local Node.js service package structure for the CDM LaTeX render service
-- [ ] 3.2 Add Node.js package metadata and dependencies for the HTTP server, Playwright/Chromium, KaTeX, and test tooling
-- [ ] 3.3 Implement `GET /health` with service name, service version, renderer identifier, and browser readiness
-- [ ] 3.4 Implement LaTeX normalization/tokenization suitable for the v1 CDM service, informed by the OmniDocBench CDM algorithm but not coupled to its module layout
-- [ ] 3.5 Implement token-identifiable KaTeX/Chromium rendering and bounding-box extraction with bounded timeouts
-- [ ] 3.6 Implement CDM matching using token identity, token position, token order, geometric outlier filtering, and F1 scoring
-- [ ] 3.7 Implement `POST /score` returning normalized score and diagnostics for render status, parse status, timeout status, and fallback usage
-- [ ] 3.8 Implement `POST /score_batch` or a public-compatible batch path that preserves input item identifiers
-- [ ] 3.9 Add service-side caching for repeated formulas or clearly document the v1 cache boundary if only minimal caching is implemented
-- [ ] 3.10 Add Node service tests for health, identical formula scoring, different formula scoring, invalid LaTeX failure response, and batch item mapping
+- [x] 3.1 Create the local Node.js service package structure for the CDM LaTeX render service
+- [x] 3.2 Add Node.js package metadata and dependencies for the HTTP server, Playwright/Chromium, KaTeX, and test tooling
+- [x] 3.3 Implement `GET /health` with service name, service version, renderer identifier, and browser readiness
+- [x] 3.4 Implement LaTeX normalization/tokenization suitable for the v1 CDM service, informed by the OmniDocBench CDM algorithm but not coupled to its module layout
+- [x] 3.5 Implement token-identifiable KaTeX/Chromium rendering and bounding-box extraction with bounded timeouts
+- [x] 3.6 Implement CDM matching using token identity, token position, token order, geometric outlier filtering, and F1 scoring
+- [x] 3.7 Implement `POST /score` returning normalized score and diagnostics for render status, parse status, timeout status, and fallback usage
+- [x] 3.8 Implement `POST /score_batch` or a public-compatible batch path that preserves input item identifiers
+- [x] 3.9 Add service-side caching for repeated formulas or clearly document the v1 cache boundary if only minimal caching is implemented
+- [x] 3.10 Add Node service tests for health, identical formula scoring, different formula scoring, invalid LaTeX failure response, and batch item mapping
 
 ## 4. GRPO Configuration and Launch Preflight
 
