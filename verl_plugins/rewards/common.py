@@ -16,6 +16,7 @@ def normalized_levenshtein_reward(
     task_type: str | None = None,
     metadata: dict[str, Any] | None = None,
     reward_version: str = DEFAULT_REWARD_VERSION,
+    **_: Any,
 ) -> dict[str, Any]:
     prediction = prediction or ""
     ground_truth = ground_truth or ""
