@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createServer } = require('../src/server');
+const { createServer, healthPayload } = require('../src/server');
 const { scoreLatexPair } = require('../src/scoring');
 const { buildKaTeXHtml, probeDependencies, renderLatex } = require('../src/renderer');
 
@@ -175,6 +175,62 @@ test('probeDependencies does not claim browserReady from package resolution alon
   assert.equal(probe.playwrightReady, true);
   assert.equal(probe.browserReady, false);
   assert.equal(probe.renderer, 'katex-fallback-pseudolayout');
+});
+
+test('healthPayload reports browser_ready true when injected readiness probe launches a browser', async () => {
+  let launchCount = 0;
+  let closeCount = 0;
+
+  const payload = await healthPayload({
+    rendererDeps: {
+      katex: { renderToString: () => '<span class="katex">x</span>' },
+      launchBrowser: async () => {
+        launchCount += 1;
+        return {
+          close: async () => {
+            closeCount += 1;
+          },
+        };
+      },
+    },
+  });
+
+  assert.equal(payload.browser_ready, true);
+  assert.equal(payload.renderer, 'katex-chromium');
+  assert.equal(launchCount, 1);
+  assert.equal(closeCount, 1);
+});
+
+test('healthPayload reports browser_ready false when injected readiness probe cannot launch a browser', async () => {
+  const payload = await healthPayload({
+    rendererDeps: {
+      katex: { renderToString: () => '<span class="katex">x</span>' },
+      launchBrowser: async () => {
+        throw new Error('missing chromium');
+      },
+    },
+  });
+
+  assert.equal(payload.browser_ready, false);
+  assert.equal(payload.renderer, 'katex-fallback-pseudolayout');
+});
+
+test('healthPayload caches injected readiness probe result', async () => {
+  let launchCount = 0;
+  const rendererDeps = {
+    katex: { renderToString: () => '<span class="katex">x</span>' },
+    launchBrowser: async () => {
+      launchCount += 1;
+      throw new Error('missing chromium');
+    },
+  };
+
+  const first = await healthPayload({ rendererDeps });
+  const second = await healthPayload({ rendererDeps });
+
+  assert.equal(first.browser_ready, false);
+  assert.equal(second.browser_ready, false);
+  assert.equal(launchCount, 1);
 });
 
 test('GET /health returns service metadata and browser readiness', async (t) => {

@@ -26,6 +26,11 @@ from tools.data_management.views import ViewBuilder, reward_smoke_test, score_pr
 from tools.data_management.views.builder import _SplitParquetWriter
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ocr_data_root(monkeypatch):
+    monkeypatch.delenv("OCR_DATA_ROOT", raising=False)
+
+
 def _minimal_png(width: int = 100, height: int = 200) -> bytes:
     buf = BytesIO()
     Image.new("RGB", (width, height), (255, 255, 255)).save(buf, format="PNG")

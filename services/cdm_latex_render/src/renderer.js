@@ -4,6 +4,7 @@ const { tokenizeLatex } = require('./latex');
 let dependencyProbe;
 let rendererDeps;
 let browserLaunchConfirmed = false;
+const injectedReadinessProbeCache = new WeakMap();
 const renderCache = new Map();
 const MAX_CACHE_ENTRIES = 512;
 
@@ -77,6 +78,46 @@ function probeDependencies(options = {}) {
     dependencyProbe = probe;
   }
   return probe;
+}
+
+async function probeBrowserReady(options = {}) {
+  const deps = resolveRendererDeps(options);
+  if (options.rendererDeps) {
+    const cached = injectedReadinessProbeCache.get(deps);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const probe = probeDependencies(options);
+  if (!probe.katexReady || !probe.playwrightReady || probe.browserReady) {
+    if (options.rendererDeps) {
+      injectedReadinessProbeCache.set(deps, probe);
+    }
+    return probe;
+  }
+
+  let browser;
+  let readinessProbe = probe;
+  try {
+    browser = await deps.launchBrowser({ headless: true, timeout: Number(options.timeoutMs || DEFAULT_TIMEOUT_MS) });
+    if (!options.rendererDeps) {
+      browserLaunchConfirmed = true;
+      dependencyProbe = null;
+    }
+    readinessProbe = probeDependencies({ ...options, rendererDeps: options.rendererDeps ? { ...deps, browserReady: true } : undefined });
+  } catch (_error) {
+    readinessProbe = probe;
+  } finally {
+    if (browser && typeof browser.close === 'function') {
+      await browser.close();
+    }
+  }
+
+  if (options.rendererDeps) {
+    injectedReadinessProbeCache.set(deps, readinessProbe);
+  }
+  return readinessProbe;
 }
 
 function cachedProbeDependencies(options = {}) {
@@ -305,6 +346,7 @@ function cacheStats() {
 
 module.exports = {
   probeDependencies: cachedProbeDependencies,
+  probeBrowserReady,
   renderLatex,
   cacheStats,
   buildKaTeXHtml,

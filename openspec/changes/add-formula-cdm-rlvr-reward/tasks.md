@@ -40,8 +40,8 @@
 
 ## 5. End-to-End Validation
 
-- [ ] 5.1 Add optional real-service integration tests gated by an environment variable so normal CI does not require Playwright/Chromium
-- [ ] 5.2 Verify a CDM-enabled reward call returns `reward_name = cdm_latex_render` for Formula samples and normalized Levenshtein for non-Formula samples
-- [ ] 5.3 Verify invalid model LaTeX returns `0.0` with diagnostics instead of raising during runtime scoring
-- [ ] 5.4 Run existing reward, data-pipeline, and GRPO configuration tests to confirm backward compatibility
-- [ ] 5.5 Document how to start the CDM service locally and how to run a CDM-enabled GRPO launch on each training node
+- [x] 5.1 Add optional real-service integration tests gated by an environment variable so normal CI does not require Playwright/Chromium
+- [x] 5.2 Verify a CDM-enabled reward call returns `reward_name = cdm_latex_render` for Formula samples and normalized Levenshtein for non-Formula samples
+- [x] 5.3 Verify invalid model LaTeX returns `0.0` with diagnostics instead of raising during runtime scoring
+- [x] 5.4 Run existing reward, data-pipeline, and GRPO configuration tests to confirm backward compatibility
+- [x] 5.5 Document how to start the CDM service locally and how to run a CDM-enabled GRPO launch on each training node

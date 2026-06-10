@@ -1,6 +1,6 @@
 const http = require('node:http');
 const { SERVICE_NAME, SERVICE_VERSION, DEFAULT_PORT } = require('./constants');
-const { probeDependencies, cacheStats } = require('./renderer');
+const { probeBrowserReady, cacheStats } = require('./renderer');
 const { scoreLatexPair } = require('./scoring');
 
 function sendJson(response, statusCode, payload) {
@@ -38,8 +38,8 @@ function readJson(request) {
   });
 }
 
-function healthPayload() {
-  const deps = probeDependencies();
+async function healthPayload(options = {}) {
+  const deps = await probeBrowserReady(options);
   return {
     ok: true,
     healthy: true,
@@ -72,7 +72,7 @@ async function handleScore(body) {
 async function route(request, response) {
   const url = new URL(request.url, 'http://127.0.0.1');
   if (request.method === 'GET' && url.pathname === '/health') {
-    sendJson(response, 200, healthPayload());
+    sendJson(response, 200, await healthPayload());
     return;
   }
 
@@ -139,8 +139,8 @@ function createServer() {
 
 if (require.main === module) {
   const server = createServer();
-  server.listen(DEFAULT_PORT, '127.0.0.1', () => {
-    const deps = probeDependencies();
+  server.listen(DEFAULT_PORT, '127.0.0.1', async () => {
+    const deps = await probeBrowserReady();
     console.log(`${SERVICE_NAME} ${SERVICE_VERSION} listening on 127.0.0.1:${DEFAULT_PORT} (${deps.renderer})`);
   });
 }

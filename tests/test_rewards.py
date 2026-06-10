@@ -208,6 +208,109 @@ def test_compute_score_uses_default_profile_for_non_formula_and_unknown_tasks():
     assert unknown_result["score"] == unknown_result["reward_total"] == 1.0
 
 
+class FakeHttpResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def read(self):
+        import json
+
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class FakeOpener:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def open(self, _request, timeout=None):
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+MIXED_REWARD_ROUTING = {"default": "normalized_levenshtein_v1", "by_task": {"formula": "cdm_katex_v1"}}
+
+
+def test_compute_score_mixed_cdm_config_routes_formula_to_cdm_and_text_to_levenshtein():
+    formula_opener = FakeOpener([FakeHttpResponse({"score": 0.625, "diagnostics": {"render_status": "ok"}})])
+    rewards = {
+        "normalized_levenshtein_v1": {"type": "normalized_levenshtein", "version": "levenshtein_v1"},
+        "cdm_katex_v1": {
+            "type": "cdm_latex_render",
+            "version": "cdm_katex_v1",
+            "service_url": "http://cdm.test",
+            "opener": formula_opener,
+        },
+    }
+
+    formula_result = compute_score(
+        data_source="ocr_vlm:region:formula",
+        solution_str=r"\\frac{1}{2}",
+        ground_truth=r"\\frac{1}{3}",
+        extra_info={"sample_id": "formula-1", "task_type": "formula"},
+        routing=MIXED_REWARD_ROUTING,
+        rewards=rewards,
+    )
+    text_result = compute_score(
+        data_source="ocr_vlm:region:text_recognition",
+        solution_str="helo",
+        ground_truth="hello",
+        extra_info={"sample_id": "text-1", "task_type": "text_recognition"},
+        routing=MIXED_REWARD_ROUTING,
+        rewards=rewards,
+    )
+
+    assert formula_result["reward_name"] == "cdm_latex_render"
+    assert formula_result["reward_profile_id"] == "cdm_katex_v1"
+    assert formula_result["score"] == formula_result["reward_total"] == 0.625
+    assert text_result["reward_name"] == "normalized_levenshtein"
+    assert text_result["reward_profile_id"] == "normalized_levenshtein_v1"
+    assert text_result["score"] == text_result["reward_total"] == 0.8
+
+
+def test_compute_score_invalid_model_latex_returns_zero_with_diagnostics_instead_of_raising():
+    opener = FakeOpener([
+        FakeHttpResponse({
+            "score": 0.0,
+            "diagnostics": {
+                "render_status": "error",
+                "parse_status": "failed",
+                "message": "KaTeX parse error: Expected '}', got EOF",
+            },
+        })
+    ])
+
+    result = compute_score(
+        data_source="ocr_vlm:region:formula",
+        solution_str=r"\\frac{1}{",
+        ground_truth=r"\\frac{1}{2}",
+        extra_info={"sample_id": "bad-latex", "task_type": "formula"},
+        routing=MIXED_REWARD_ROUTING,
+        rewards={
+            "normalized_levenshtein_v1": {"type": "normalized_levenshtein", "version": "levenshtein_v1"},
+            "cdm_katex_v1": {
+                "type": "cdm_latex_render",
+                "version": "cdm_katex_v1",
+                "service_url": "http://cdm.test",
+                "opener": opener,
+            },
+        },
+    )
+
+    assert result["score"] == result["reward_total"] == 0.0
+    assert result["reward_name"] == "cdm_latex_render"
+    assert result["reward_profile_id"] == "cdm_katex_v1"
+    assert result["diagnostics"]["render_status"] == "error"
+    assert result["diagnostics"]["parse_status"] == "failed"
+
+
 def test_compute_score_raises_clear_error_for_missing_profile():
     with pytest.raises(ValueError, match="missing reward profile 'missing_profile'"):
         compute_score(
